@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 bedrock = boto3.client("bedrock-runtime", region_name="ap-southeast-1")
 
-MODEL_ID = "global.anthropic.claude-sonnet-4-6-20260217-v1:0"
+MODEL_ID = "global.anthropic.claude-sonnet-4-6"
 
 SYSTEM_PROMPT = """You are an expert AI waste management advisor. Based on the waste item shown in the image (with optional context from the user), provide actionable disposal guidance.
 
