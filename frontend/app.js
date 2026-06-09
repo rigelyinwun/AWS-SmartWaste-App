@@ -24,12 +24,7 @@ const chatInput = document.getElementById('chatInput');
 const chatSend = document.getElementById('chatSend');
 const chatContainer = document.getElementById('chatContainer');
 
-// File upload handling
-uploadZone.addEventListener('click', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    fileInput.click();
-});
+// File upload handling — label handles click natively via for="fileInput"
 
 uploadZone.addEventListener('dragover', (e) => {
     e.preventDefault();
