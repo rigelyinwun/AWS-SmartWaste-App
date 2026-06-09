@@ -44,21 +44,23 @@ Additional Instructions:
 - Avoid unnecessary details or extended explanations"""
 
 
-def build_cors_headers():
-    return {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "POST,OPTIONS",
-    }
+@app.after_request
+def add_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return response
 
 
-@app.route("/", methods=["OPTIONS"])
-def options():
-    return Response("", status=200, headers=build_cors_headers())
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        return Response("", status=200)
 
 
-@app.route("/", methods=["POST"])
-def analyze():
+@app.route("/", methods=["POST", "OPTIONS"], defaults={"path": ""})
+@app.route("/<path:path>", methods=["POST", "OPTIONS"])
+def analyze(path):
     data = request.get_json(force=True)
     description = data.get("description", "")
     location = data.get("location", "")
@@ -119,9 +121,7 @@ def analyze():
                 if delta.get("type") == "text_delta":
                     yield delta["text"]
 
-    headers = build_cors_headers()
-    headers["Content-Type"] = "text/plain; charset=utf-8"
-    return Response(stream_with_context(generate()), headers=headers)
+    return Response(stream_with_context(generate()), content_type="text/plain; charset=utf-8")
 
 
 if __name__ == "__main__":

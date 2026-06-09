@@ -95,8 +95,6 @@ Include:
 * Estimated CO2-equivalent impact where possible
 * Why this waste item contributes at that level
 * Comparison to relatable activities when relevant
-  * e.g., "Equivalent to driving X km"
-  * "Similar emissions to charging a smartphone for X days"
 
 Future Impact Insight
 Provide a cumulative long-term projection if disposal behavior repeats.
@@ -106,18 +104,6 @@ Include:
 * Long-term pollution persistence
 * Ecosystem burden over time
 * Climate consequences over years
-
-Make it tangible:
-Examples:
-* "If one of these is discarded weekly for a year..."
-* "If 10,000 households dispose of this improperly each month..."
-* "Over 5 years, this could contribute to..."
-
-Include:
-* Estimated accumulated CO2 emissions
-* Estimated landfill burden
-* Potential microplastic generation
-* Risks to urban drainage systems or marine ecosystems
 
 Human Health Impact
 Analyze potential impacts on people:
@@ -132,7 +118,7 @@ Provide realistic disposal guidance specific to the item:
 * Recycle / reuse / compost / hazardous disposal
 * Correct disposal bin/category
 * Whether cleaning/separation is needed before recycling
-* Safer alternatives if applicable (if no just skip)
+* Safer alternatives if applicable
 
 Include:
 * Most sustainable disposal method
@@ -141,10 +127,6 @@ Include:
 
 Educational Insight
 Provide 2-3 concise educational facts related specifically to this waste item.
-Examples:
-* "This item may break into microplastics smaller than 5 mm."
-* "Aluminum can be recycled indefinitely with lower energy use."
-* "Food waste in landfills generates methane, a potent greenhouse gas."
 
 Output Style Requirements:
 * Use bullet points
@@ -153,32 +135,26 @@ Output Style Requirements:
 * Tailor every explanation specifically to the identified item
 * Use concise but information-rich explanations
 * Include approximate quantitative estimates where possible
-* If uncertain about the object, state confidence level and possible alternatives
-
-Additional Instructions:
-* If the image quality is unclear, infer the most likely waste item and mention uncertainty
-* Prioritize real-world environmental behavior over theoretical recyclability
-* Consider regional waste management limitations where relevant
-* Do not provide vague statements like "bad for the environment" without explanation
-* Use practical environmental science terminology appropriately
-* Distinguish between biodegradable, compostable, recyclable, and degradable materials"""
+* If uncertain about the object, state confidence level and possible alternatives"""
 
 
-def build_cors_headers():
-    return {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "POST,OPTIONS",
-    }
+@app.after_request
+def add_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return response
 
 
-@app.route("/", methods=["OPTIONS"])
-def options():
-    return Response("", status=200, headers=build_cors_headers())
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        return Response("", status=200)
 
 
-@app.route("/", methods=["POST"])
-def analyze():
+@app.route("/", methods=["POST", "OPTIONS"], defaults={"path": ""})
+@app.route("/<path:path>", methods=["POST", "OPTIONS"])
+def analyze(path):
     data = request.get_json(force=True)
     description = data.get("description", "")
     file_data = data.get("file_data")
@@ -234,9 +210,7 @@ def analyze():
                 if delta.get("type") == "text_delta":
                     yield delta["text"]
 
-    headers = build_cors_headers()
-    headers["Content-Type"] = "text/plain; charset=utf-8"
-    return Response(stream_with_context(generate()), headers=headers)
+    return Response(stream_with_context(generate()), content_type="text/plain; charset=utf-8")
 
 
 if __name__ == "__main__":
