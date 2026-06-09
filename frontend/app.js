@@ -25,7 +25,11 @@ const chatSend = document.getElementById('chatSend');
 const chatContainer = document.getElementById('chatContainer');
 
 // File upload handling
-uploadZone.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fileInput.click();
+});
 
 uploadZone.addEventListener('dragover', (e) => {
     e.preventDefault();
