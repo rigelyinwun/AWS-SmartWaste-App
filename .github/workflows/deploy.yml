@@ -48,16 +48,27 @@ jobs:
           }
 
           URL=$(get_output WasteDetailsUrl)
+          echo "WasteDetailsUrl = $URL"
+          if [ -z "$URL" ] || [ "$URL" = "None" ]; then echo "ERROR: WasteDetailsUrl is empty"; exit 1; fi
           sed -i "s|__URL_WASTE_DETAILS__|$URL|g" frontend/index.html
 
           URL=$(get_output FurtherActionsUrl)
+          echo "FurtherActionsUrl = $URL"
+          if [ -z "$URL" ] || [ "$URL" = "None" ]; then echo "ERROR: FurtherActionsUrl is empty"; exit 1; fi
           sed -i "s|__URL_FURTHER_ACTIONS__|$URL|g" frontend/index.html
 
           URL=$(get_output EnvironmentalImpactUrl)
+          echo "EnvironmentalImpactUrl = $URL"
+          if [ -z "$URL" ] || [ "$URL" = "None" ]; then echo "ERROR: EnvironmentalImpactUrl is empty"; exit 1; fi
           sed -i "s|__URL_ENVIRONMENTAL_IMPACT__|$URL|g" frontend/index.html
 
           URL=$(get_output SmartWasteAssistantUrl)
+          echo "SmartWasteAssistantUrl = $URL"
+          if [ -z "$URL" ] || [ "$URL" = "None" ]; then echo "ERROR: SmartWasteAssistantUrl is empty"; exit 1; fi
           sed -i "s|__URL_SMARTWASTE_ASSISTANT__|$URL|g" frontend/index.html
+
+          echo "--- Verifying replacements ---"
+          grep "STREAM_URLS" frontend/index.html
 
       - name: Deploy Frontend to S3
         run: |
