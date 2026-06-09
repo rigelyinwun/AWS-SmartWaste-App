@@ -27,23 +27,12 @@ Material Composition: Briefly explain what materials this item is likely made of
 Please be highly specific. If the image is unclear, acknowledge the uncertainty."""
 
 
-@app.after_request
-def add_cors(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    return response
-
-
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        return Response("", status=200)
-
-
 @app.route("/", methods=["POST", "OPTIONS"], defaults={"path": ""})
 @app.route("/<path:path>", methods=["POST", "OPTIONS"])
 def analyze(path):
+    if request.method == "OPTIONS":
+        return Response("", status=200)
+
     try:
         data = request.get_json(force=True)
         logger.info("Request received, keys: %s", list(data.keys()))

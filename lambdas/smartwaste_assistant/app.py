@@ -1,6 +1,11 @@
 import json
+import logging
+import traceback
 import boto3
 from flask import Flask, request, Response, stream_with_context
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 bedrock = boto3.client("bedrock-runtime", region_name="ap-southeast-1")
@@ -22,141 +27,86 @@ Guidelines:
 - If uncertain, provide the most likely identification and mention uncertainty.
 - Keep responses concise, practical, and realistic.
 - Avoid generic recycling advice.
-- Avoid overly long explanations.
 - Do not invent exact recycling centres or exact emission numbers unless clearly known.
-- Provide environmentally responsible recommendations.
-
-If a location is provided:
-- Suggest realistic nearby disposal options or facility types.
-
-If location is not provided:
-- Give general disposal guidance only.
-
-Always generate output using this structure:
-
-# Waste Identification
-- Name:
-- Category:
-- Confidence Level:
-
-# Recyclability Level
-- Level:
-- Explanation:
-
-# Estimated Weight
-- Approximate Weight:
-
-# Disposal Method
-- Recommended Method:
-- Why:
-
-# Nearby Disposal Suggestion
-- Suggestion:
-
-# Environmental Impact
-- Land Impact:
-- Water Impact:
-- Wildlife Impact:
-
-# Climate Impact
-- Emissions:
-- Impact Rating:
-- Explanation:
-
-# Better Alternative
-- Suggested Alternative:
-
-# Action Step
-- Immediate Action:
-
-# Future Impact Insight
-- Long-Term Effect:"""
-
-
-@app.after_request
-def add_cors(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    return response
-
-
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        return Response("", status=200)
+- Provide environmentally responsible recommendations."""
 
 
 @app.route("/", methods=["POST", "OPTIONS"], defaults={"path": ""})
 @app.route("/<path:path>", methods=["POST", "OPTIONS"])
 def chat(path):
-    data = request.get_json(force=True)
-    message = data.get("message", "")
-    history = data.get("history", [])
-    file_data = data.get("file_data")
-    file_mime = data.get("file_mime")
-    description = data.get("description", "")
-    location = data.get("location", "")
+    if request.method == "OPTIONS":
+        return Response("", status=200)
 
-    messages = []
+    try:
+        data = request.get_json(force=True)
+        logger.info("Request received, keys: %s", list(data.keys()))
+        message = data.get("message", "")
+        history = data.get("history", [])
+        file_data = data.get("file_data")
+        file_mime = data.get("file_mime")
+        description = data.get("description", "")
+        location = data.get("location", "")
 
-    for msg in history:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+        messages = []
 
-    user_content = []
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
 
-    if file_data and file_mime:
-        if file_mime.startswith("image/"):
-            user_content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": file_mime,
-                    "data": file_data,
-                },
-            })
-        else:
-            user_content.append({
-                "type": "document",
-                "source": {
-                    "type": "base64",
-                    "media_type": file_mime,
-                    "data": file_data,
-                },
-            })
+        user_content = []
 
-    prompt_text = message
-    if description:
-        prompt_text += f"\n\nWaste description: {description}"
-    if location:
-        prompt_text += f"\n\nUser location: {location}"
+        if file_data and file_mime:
+            if file_mime.startswith("image/"):
+                user_content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": file_mime,
+                        "data": file_data,
+                    },
+                })
 
-    user_content.append({"type": "text", "text": prompt_text})
-    messages.append({"role": "user", "content": user_content})
+        prompt_text = message
+        if description:
+            prompt_text += f"\n\nWaste description: {description}"
+        if location:
+            prompt_text += f"\n\nUser location: {location}"
 
-    body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 4096,
-        "temperature": 0,
-        "system": SYSTEM_PROMPT,
-        "messages": messages,
-    }
+        user_content.append({"type": "text", "text": prompt_text})
+        messages.append({"role": "user", "content": user_content})
 
-    def generate():
-        response = bedrock.invoke_model_with_response_stream(
-            modelId=MODEL_ID,
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps(body),
-        )
-        for event in response["body"]:
-            chunk = json.loads(event["chunk"]["bytes"])
-            if chunk.get("type") == "content_block_delta":
-                delta = chunk.get("delta", {})
-                if delta.get("type") == "text_delta":
-                    yield delta["text"]
+        body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 4096,
+            "temperature": 0,
+            "system": SYSTEM_PROMPT,
+            "messages": messages,
+        }
 
-    return Response(stream_with_context(generate()), content_type="text/plain; charset=utf-8")
+        logger.info("Calling Bedrock model: %s", MODEL_ID)
+
+        def generate():
+            try:
+                response = bedrock.invoke_model_with_response_stream(
+                    modelId=MODEL_ID,
+                    contentType="application/json",
+                    accept="application/json",
+                    body=json.dumps(body),
+                )
+                for event in response["body"]:
+                    chunk = json.loads(event["chunk"]["bytes"])
+                    if chunk.get("type") == "content_block_delta":
+                        delta = chunk.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            yield delta["text"]
+            except Exception as e:
+                logger.error("Error in generate: %s", traceback.format_exc())
+                yield f"\n\nERROR: {str(e)}"
+
+        return Response(stream_with_context(generate()), content_type="text/plain; charset=utf-8")
+
+    except Exception as e:
+        logger.error("Error in analyze: %s", traceback.format_exc())
+        return Response(f"Error: {str(e)}", status=500, content_type="text/plain")
 
 
 if __name__ == "__main__":
