@@ -1,13 +1,7 @@
 (function() {
     'use strict';
 
-    // Stream URLs injected by GitHub Actions during deployment
-    var STREAM_URLS = {
-        waste_details: '__URL_WASTE_DETAILS__',
-        further_actions: '__URL_FURTHER_ACTIONS__',
-        environmental_impact: '__URL_ENVIRONMENTAL_IMPACT__',
-        smartwaste_assistant: '__URL_SMARTWASTE_ASSISTANT__',
-    };
+    // STREAM_URLS is defined in index.html (injected by CI/CD)
 
     // State
     var fileData = null;
