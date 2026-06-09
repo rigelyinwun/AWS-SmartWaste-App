@@ -21,12 +21,12 @@
                 <h2>Upload Waste Image</h2>
                 <span class="badge required">Required</span>
             </div>
-            <label class="upload-zone" id="uploadZone" for="fileInput">
+            <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" style="position:absolute;left:-9999px">
+            <div class="upload-zone" id="uploadZone">
                 <div class="upload-icon">⬆️</div>
                 <p class="upload-text">Please upload your waste image</p>
                 <p class="upload-hint">Drag & drop or click to select (JPG, PNG, WEBP)</p>
-                <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" style="display:none">
-            </label>
+            </div>
             <div class="upload-preview" id="uploadPreview" hidden>
                 <img id="previewImg" alt="Uploaded waste image preview">
                 <button class="btn-remove" id="removeFile">✕ Remove</button>
@@ -48,7 +48,7 @@
                     <h2>Your Location</h2>
                     <span class="badge optional">Optional</span>
                 </div>
-                <textarea id="location" placeholder="City or area (optional)" rows="3"></textarea>
+                <textarea id="locationInput" placeholder="City or area (optional)" rows="3"></textarea>
             </section>
         </div>
 
