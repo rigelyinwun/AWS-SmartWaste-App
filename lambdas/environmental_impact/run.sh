@@ -1,2 +1,2 @@
 #!/bin/bash
-python app.py
+exec python app.py

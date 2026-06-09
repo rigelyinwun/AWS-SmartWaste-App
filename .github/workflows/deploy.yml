@@ -28,7 +28,9 @@ jobs:
         uses: aws-actions/setup-sam@v2
 
       - name: SAM Build
-        run: sam build --template infra/template.yaml
+        run: |
+          chmod +x lambdas/*/run.sh
+          sam build --template infra/template.yaml
 
       - name: SAM Deploy
         run: |
