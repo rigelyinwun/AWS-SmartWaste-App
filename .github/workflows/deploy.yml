@@ -57,7 +57,7 @@ jobs:
             aws lambda update-function-url-config \
               --function-name "$FUNC_NAME" \
               --auth-type NONE \
-              --cors '{"AllowOrigins":["*"],"AllowMethods":["POST","OPTIONS"],"AllowHeaders":["Content-Type"]}' || true
+              --cors '{"AllowOrigins":["*"],"AllowMethods":["*"],"AllowHeaders":["*"]}' || true
           done
 
           URL=$(get_output WasteDetailsUrl)
