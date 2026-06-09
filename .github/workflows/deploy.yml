@@ -39,7 +39,8 @@ jobs:
             --region ap-southeast-1 \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
-            --force-upload
+            --force-upload \
+            --parameter-overrides DeployTimestamp=$(date +%s)
 
       - name: Get Stack Outputs and Inject URLs
         run: |
@@ -47,6 +48,17 @@ jobs:
             aws cloudformation describe-stacks --stack-name smartwaste \
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
           }
+
+          # Configure CORS on each Function URL
+          for func in WasteDetailsFunction FurtherActionsFunction EnvironmentalImpactFunction SmartWasteAssistantFunction; do
+            FUNC_NAME=$(aws cloudformation describe-stack-resource --stack-name smartwaste \
+              --logical-resource-id $func --query "StackResourceDetail.PhysicalResourceId" --output text)
+            echo "Configuring CORS for $func ($FUNC_NAME)"
+            aws lambda update-function-url-config \
+              --function-name "$FUNC_NAME" \
+              --auth-type NONE \
+              --cors '{"AllowOrigins":["*"],"AllowMethods":["POST","OPTIONS"],"AllowHeaders":["Content-Type"]}' || true
+          done
 
           URL=$(get_output WasteDetailsUrl)
           echo "WasteDetailsUrl = $URL"

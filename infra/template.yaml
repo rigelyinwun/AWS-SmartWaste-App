@@ -2,6 +2,11 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: SmartWaste - AI-powered waste analysis application
 
+Parameters:
+  DeployTimestamp:
+    Type: String
+    Default: "0"
+
 Globals:
   Function:
     Timeout: 60
@@ -50,17 +55,10 @@ Resources:
           AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
           AWS_LWA_INVOKE_MODE: response_stream
           PORT: "8080"
+          DEPLOY_TS: !Ref DeployTimestamp
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: RESPONSE_STREAM
-        Cors:
-          AllowOrigins:
-            - "*"
-          AllowMethods:
-            - POST
-            - OPTIONS
-          AllowHeaders:
-            - Content-Type
 
   # Further Actions Lambda
   FurtherActionsFunction:
@@ -76,17 +74,10 @@ Resources:
           AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
           AWS_LWA_INVOKE_MODE: response_stream
           PORT: "8080"
+          DEPLOY_TS: !Ref DeployTimestamp
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: RESPONSE_STREAM
-        Cors:
-          AllowOrigins:
-            - "*"
-          AllowMethods:
-            - POST
-            - OPTIONS
-          AllowHeaders:
-            - Content-Type
 
   # Environmental Impact Lambda
   EnvironmentalImpactFunction:
@@ -102,17 +93,10 @@ Resources:
           AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
           AWS_LWA_INVOKE_MODE: response_stream
           PORT: "8080"
+          DEPLOY_TS: !Ref DeployTimestamp
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: RESPONSE_STREAM
-        Cors:
-          AllowOrigins:
-            - "*"
-          AllowMethods:
-            - POST
-            - OPTIONS
-          AllowHeaders:
-            - Content-Type
 
   # SmartWaste Assistant Lambda
   SmartWasteAssistantFunction:
@@ -128,17 +112,10 @@ Resources:
           AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
           AWS_LWA_INVOKE_MODE: response_stream
           PORT: "8080"
+          DEPLOY_TS: !Ref DeployTimestamp
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: RESPONSE_STREAM
-        Cors:
-          AllowOrigins:
-            - "*"
-          AllowMethods:
-            - POST
-            - OPTIONS
-          AllowHeaders:
-            - Content-Type
 
   # S3 Bucket for Frontend
   FrontendBucket:
