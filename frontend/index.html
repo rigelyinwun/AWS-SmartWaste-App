@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartWaste - AI Waste Analysis</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <h1>♻️ SmartWaste</h1>
+            <p class="subtitle">AI-Powered Waste Analysis & Disposal Guide</p>
+        </div>
+    </header>
+
+    <main>
+        <!-- Widget 1: Upload Waste Image -->
+        <section class="widget upload-widget">
+            <div class="widget-header">
+                <h2>Upload Waste Image</h2>
+                <span class="badge required">Required</span>
+            </div>
+            <div class="upload-zone" id="uploadZone">
+                <div class="upload-icon">⬆️</div>
+                <p class="upload-text">Please upload your waste image</p>
+                <p class="upload-hint">Drag & drop or click to select (JPG, PNG, WEBP)</p>
+                <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" hidden>
+            </div>
+            <div class="upload-preview" id="uploadPreview" hidden>
+                <img id="previewImg" alt="Uploaded waste image preview">
+                <button class="btn-remove" id="removeFile">✕ Remove</button>
+            </div>
+        </section>
+
+        <!-- Widget 2 & 3: Description and Location -->
+        <div class="input-row">
+            <section class="widget input-widget">
+                <div class="widget-header">
+                    <h2>Waste Description</h2>
+                    <span class="badge optional">Optional</span>
+                </div>
+                <textarea id="description" placeholder="Brief description of the item (optional)" rows="3"></textarea>
+            </section>
+
+            <section class="widget input-widget">
+                <div class="widget-header">
+                    <h2>Your Location</h2>
+                    <span class="badge optional">Optional</span>
+                </div>
+                <textarea id="location" placeholder="City or area (optional)" rows="3"></textarea>
+            </section>
+        </div>
+
+        <!-- Run All Button -->
+        <div class="run-section">
+            <button class="btn-run" id="runAll">🔍 Analyze Waste</button>
+        </div>
+
+        <!-- Widget 4 & 5: Waste Details and Further Actions -->
+        <div class="output-row">
+            <section class="widget output-widget">
+                <div class="widget-header ai-header">
+                    <h2>✨ Waste Details</h2>
+                </div>
+                <div class="output-panel" id="wasteDetailsPanel">
+                    <div class="placeholder-text">Upload an image and click Analyze to see results</div>
+                </div>
+            </section>
+
+            <section class="widget output-widget">
+                <div class="widget-header ai-header">
+                    <h2>✨ Further Actions</h2>
+                </div>
+                <div class="output-panel" id="furtherActionsPanel">
+                    <div class="placeholder-text">Upload an image and click Analyze to see results</div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Widget 6: Environmental Impact -->
+        <section class="widget output-widget full-width">
+            <div class="widget-header ai-header">
+                <h2>✨ Environmental Impact</h2>
+            </div>
+            <div class="output-panel" id="environmentalImpactPanel">
+                <div class="placeholder-text">Upload an image and click Analyze to see results</div>
+            </div>
+        </section>
+
+        <!-- Widget 7: SmartWaste Assistant -->
+        <section class="widget chat-widget">
+            <div class="widget-header ai-header">
+                <h2>✨ SmartWaste Assistant</h2>
+            </div>
+            <div class="chat-container" id="chatContainer">
+                <div class="chat-message assistant">
+                    <div class="message-content">
+                        Hi! I'm your SmartWaste Assistant, here to help you dispose of waste correctly and save the environment. 🌍♻️
+
+You can ask me about:
+• Specific waste disposal questions
+• Recycling guidelines for different materials
+• How to reduce waste in daily life
+• Environmental impacts of different disposal methods
+• Finding local disposal facilities
+• Eco-friendly alternatives to common items
+
+What would you like to know about waste disposal?
+                    </div>
+                </div>
+            </div>
+            <div class="chat-input-area">
+                <input type="text" id="chatInput" placeholder="Ask about waste disposal..." />
+                <button class="btn-send" id="chatSend">➤</button>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>SmartWaste — Powered by Amazon Bedrock & Claude</p>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>

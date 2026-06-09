@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: SmartWaste - AI-powered waste analysis application
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 256
+    Runtime: python3.12
+
+Resources:
+  # IAM Role for all Lambda functions
+  AppBedrockRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "smartwaste-bedrock-role-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockInvokePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/global.anthropic.claude-sonnet-4-6-20260217-v1:0"
+                  - "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6-20260217-v1:0"
+
+  # Waste Details Lambda
+  WasteDetailsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/waste_details/
+      Handler: run.sh
+      Layers:
+        - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:27"
+      Role: !GetAtt AppBedrockRole.Arn
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          AWS_LWA_INVOKE_MODE: response_stream
+          PORT: "8080"
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+
+  # Further Actions Lambda
+  FurtherActionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/further_actions/
+      Handler: run.sh
+      Layers:
+        - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:27"
+      Role: !GetAtt AppBedrockRole.Arn
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          AWS_LWA_INVOKE_MODE: response_stream
+          PORT: "8080"
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+
+  # Environmental Impact Lambda
+  EnvironmentalImpactFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/environmental_impact/
+      Handler: run.sh
+      Layers:
+        - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:27"
+      Role: !GetAtt AppBedrockRole.Arn
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          AWS_LWA_INVOKE_MODE: response_stream
+          PORT: "8080"
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+
+  # SmartWaste Assistant Lambda
+  SmartWasteAssistantFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/smartwaste_assistant/
+      Handler: run.sh
+      Layers:
+        - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:27"
+      Role: !GetAtt AppBedrockRole.Arn
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          AWS_LWA_INVOKE_MODE: response_stream
+          PORT: "8080"
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+
+  # S3 Bucket for Frontend
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+
+Outputs:
+  WasteDetailsUrl:
+    Value: !GetAtt WasteDetailsFunctionUrl.FunctionUrl
+  FurtherActionsUrl:
+    Value: !GetAtt FurtherActionsFunctionUrl.FunctionUrl
+  EnvironmentalImpactUrl:
+    Value: !GetAtt EnvironmentalImpactFunctionUrl.FunctionUrl
+  SmartWasteAssistantUrl:
+    Value: !GetAtt SmartWasteAssistantFunctionUrl.FunctionUrl
+  WebsiteUrl:
+    Value: !GetAtt FrontendBucket.WebsiteURL
+  BucketName:
+    Value: !Ref FrontendBucket
