@@ -38,7 +38,8 @@ jobs:
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
             --region ap-southeast-1 \
             --no-confirm-changeset \
-            --no-fail-on-empty-changeset
+            --no-fail-on-empty-changeset \
+            --force-upload
 
       - name: Get Stack Outputs and Inject URLs
         run: |
