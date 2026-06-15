@@ -340,11 +340,18 @@
         while (i < bullets.length) {
             var bullet = bullets[i];
 
-            // Check if this is a numbered parent like "1. REUSE ✓ (Best Option)"
-            var isNumberedParent = /^\d+\.\s+[A-Z]/.test(bullet);
-
             // Check if this bullet ends with :* (sub-heading)
             var isColonParent = /:\s*\*?\s*$/.test(bullet);
+
+            // Check if this is a numbered parent — only if next item is NOT numbered
+            var isNumberedParent = false;
+            if (/^\d+\.\s+[A-Z]/.test(bullet)) {
+                // Look ahead: if next bullet exists and is NOT numbered, this is a parent
+                var nextIdx = i + 1;
+                if (nextIdx < bullets.length && !/^\d+\.\s/.test(bullets[nextIdx])) {
+                    isNumberedParent = true;
+                }
+            }
 
             if (isNumberedParent || isColonParent) {
                 var label = bullet;
@@ -359,7 +366,8 @@
                 while (i < bullets.length) {
                     var next = bullets[i];
                     // Stop if we hit another numbered parent or colon parent
-                    if (/^\d+\.\s+[A-Z]/.test(next) || /:\s*\*?\s*$/.test(next)) break;
+                    if (/^\d+\.\s+[A-Z]/.test(next)) break;
+                    if (/:\s*\*?\s*$/.test(next)) break;
                     children.push(next);
                     i++;
                 }
