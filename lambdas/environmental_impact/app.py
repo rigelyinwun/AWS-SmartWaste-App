@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 bedrock = boto3.client("bedrock-runtime", region_name="ap-southeast-1")
 
-MODEL_ID = "global.anthropic.claude-sonnet-4-6"
+MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
 
 SYSTEM_PROMPT = """You are an environmental scientist specializing in waste impact analysis, lifecycle assessment (LCA), and climate sustainability. Analyze the waste item shown in the image with optional supporting context from the user description.
 
