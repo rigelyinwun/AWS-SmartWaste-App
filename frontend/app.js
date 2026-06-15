@@ -343,32 +343,16 @@
             // Check if this bullet ends with :* (sub-heading)
             var isColonParent = /:\s*\*?\s*$/.test(bullet);
 
-            // Check if this is a numbered parent — only if next item is NOT numbered
-            var isNumberedParent = false;
-            if (/^\d+\.\s+[A-Z]/.test(bullet)) {
-                // Look ahead: if next bullet exists and is NOT numbered, this is a parent
-                var nextIdx = i + 1;
-                if (nextIdx < bullets.length && !/^\d+\.\s/.test(bullets[nextIdx])) {
-                    isNumberedParent = true;
-                }
-            }
-
-            if (isNumberedParent || isColonParent) {
-                var label = bullet;
-                if (isColonParent) {
-                    label = bullet.replace(/:\s*\*?\s*$/, '');
-                }
+            if (isColonParent) {
+                var label = bullet.replace(/:\s*\*?\s*$/, '');
                 html += '<li><strong>' + escapeHtml(label) + '</strong>';
 
-                // Collect child bullets until next parent
+                // Collect child bullets until next colon parent
                 var children = [];
                 i++;
                 while (i < bullets.length) {
-                    var next = bullets[i];
-                    // Stop if we hit another numbered parent or colon parent
-                    if (/^\d+\.\s+[A-Z]/.test(next)) break;
-                    if (/:\s*\*?\s*$/.test(next)) break;
-                    children.push(next);
+                    if (/:\s*\*?\s*$/.test(bullets[i])) break;
+                    children.push(bullets[i]);
                     i++;
                 }
                 if (children.length > 0) {
@@ -442,11 +426,15 @@
 
             if (isBullet) {
                 var cleaned = cleanMarkdown(bulletText);
+                // Strip leading numbering like "1. " or "2. "
+                cleaned = cleaned.replace(/^\d+\.\s+/, '');
                 if (cleaned && cleaned !== '--' && cleaned !== '-') {
                     currentSection.bullets.push(cleaned);
                 }
             } else {
                 var cleanedLine = cleanMarkdown(line);
+                // Strip leading numbering
+                cleanedLine = cleanedLine.replace(/^\d+\.\s+/, '');
                 if (cleanedLine) currentSection.bullets.push(cleanedLine);
             }
         }
