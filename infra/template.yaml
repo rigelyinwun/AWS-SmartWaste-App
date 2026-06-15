@@ -38,8 +38,8 @@ Resources:
                   - bedrock:InvokeModel
                   - bedrock:InvokeModelWithResponseStream
                 Resource:
-                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
-                  - "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku*"
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/global.anthropic.claude-haiku-4-5*"
+                  - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5*"
                   - "arn:aws:bedrock:*::foundation-model/anthropic.claude*"
 
   # Waste Details Lambda
