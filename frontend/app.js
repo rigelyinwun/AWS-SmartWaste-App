@@ -190,11 +190,11 @@
 
     // --- Rendering: Environmental Impact (Rich Layout) ---
     function renderEnvironmentalImpact(text) {
-        var sections = parseSections(text);
+        var sections = parseEnvSections(text);
         var html = '<div class="env-impact-layout">';
 
         // Try to extract key data
-        var identification = findSection(sections, 'identification');
+        var identification = findEnvSection(sections, 'identification');
         var decomposition = extractDecomposition(text);
 
         // Row 1: Identification + Decomposition Time
@@ -219,48 +219,30 @@
         }
         html += '</div>';
 
-        // Row 2: Impact images (land/water/wildlife) if present
-        var landImpact = findSection(sections, 'land');
-        var waterImpact = findSection(sections, 'water');
-        var wildlifeImpact = findSection(sections, 'wildlife');
-        var hasAnyImpact = landImpact || waterImpact || wildlifeImpact;
+        // Row 2: Impact images (land/water/wildlife) if they have actual content
+        var landImpact = findEnvSection(sections, 'land');
+        var waterImpact = findEnvSection(sections, 'water');
+        var wildlifeImpact = findEnvSection(sections, 'wildlife');
 
-        if (hasAnyImpact) {
+        // Only show cards that have actual bullet content
+        var impactCards = [];
+        if (landImpact && landImpact.bullets.length > 0) impactCards.push({ data: landImpact, img: 'images/landfill.jpg', alt: 'Land impact', title: 'Land Impact' });
+        if (waterImpact && waterImpact.bullets.length > 0) impactCards.push({ data: waterImpact, img: 'images/water.jpeg', alt: 'Water impact', title: 'Water Impact' });
+        if (wildlifeImpact && wildlifeImpact.bullets.length > 0) impactCards.push({ data: wildlifeImpact, img: 'images/wildlife.jpg', alt: 'Wildlife impact', title: 'Wildlife Impact' });
+
+        if (impactCards.length > 0) {
             html += '<div class="env-section-block">';
             html += '<div class="env-section-heading">Environmental Impact</div>';
             html += '<div class="env-impact-grid">';
 
-            if (landImpact) {
+            for (var ic = 0; ic < impactCards.length; ic++) {
+                var card = impactCards[ic];
                 html += '<div class="env-impact-card">';
-                html += '<img src="images/landfill.jpg" alt="Land impact" class="env-impact-img">';
-                html += '<div class="env-impact-card-title">Land Impact</div>';
+                html += '<img src="' + card.img + '" alt="' + card.alt + '" class="env-impact-img">';
+                html += '<div class="env-impact-card-title">' + card.title + '</div>';
                 html += '<ul class="env-list-sm">';
-                for (var li = 0; li < landImpact.bullets.length; li++) {
-                    html += '<li>' + escapeHtml(landImpact.bullets[li]) + '</li>';
-                }
-                html += '</ul>';
-                html += '</div>';
-            }
-
-            if (waterImpact) {
-                html += '<div class="env-impact-card">';
-                html += '<img src="images/water.jpeg" alt="Water impact" class="env-impact-img">';
-                html += '<div class="env-impact-card-title">Water Impact</div>';
-                html += '<ul class="env-list-sm">';
-                for (var wi = 0; wi < waterImpact.bullets.length; wi++) {
-                    html += '<li>' + escapeHtml(waterImpact.bullets[wi]) + '</li>';
-                }
-                html += '</ul>';
-                html += '</div>';
-            }
-
-            if (wildlifeImpact) {
-                html += '<div class="env-impact-card">';
-                html += '<img src="images/wildlife.jpg" alt="Wildlife impact" class="env-impact-img">';
-                html += '<div class="env-impact-card-title">Wildlife Impact</div>';
-                html += '<ul class="env-list-sm">';
-                for (var wli = 0; wli < wildlifeImpact.bullets.length; wli++) {
-                    html += '<li>' + escapeHtml(wildlifeImpact.bullets[wli]) + '</li>';
+                for (var cb = 0; cb < card.data.bullets.length; cb++) {
+                    html += '<li>' + escapeHtml(card.data.bullets[cb]) + '</li>';
                 }
                 html += '</ul>';
                 html += '</div>';
@@ -271,9 +253,15 @@
         }
 
         // Remaining sections: simple text cards
-        var handled = [identification, landImpact, waterImpact, wildlifeImpact];
+        var handledTitles = [];
+        if (identification) handledTitles.push(identification.title);
+        if (landImpact) handledTitles.push(landImpact.title);
+        if (waterImpact) handledTitles.push(waterImpact.title);
+        if (wildlifeImpact) handledTitles.push(wildlifeImpact.title);
+
         for (var si = 0; si < sections.length; si++) {
-            if (handled.indexOf(sections[si]) !== -1) continue;
+            if (handledTitles.indexOf(sections[si].title) !== -1) continue;
+            if (sections[si].bullets.length === 0) continue;
             html += '<div class="env-section-block">';
             html += '<div class="env-section-heading">' + escapeHtml(sections[si].title) + '</div>';
             html += '<ul class="env-list">';
@@ -286,6 +274,66 @@
 
         html += '</div>';
         return html;
+    }
+
+    // Parse env impact text into sections, handling nested sub-headings like "Land Degradation:*"
+    function parseEnvSections(text) {
+        var lines = text.split('\n');
+        var sections = [];
+        var currentSection = null;
+
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i].trim();
+            if (!line) continue;
+            if (/^-{2,}$/.test(line)) continue;
+
+            // Markdown headers
+            if (line.startsWith('#')) {
+                if (currentSection) sections.push(currentSection);
+                currentSection = {
+                    title: cleanMarkdown(line.replace(/^#+\s*/, '')),
+                    bullets: []
+                };
+                continue;
+            }
+
+            // Bullet that ends with :* or : (sub-heading within a section)
+            var bulletText = line.replace(/^[\-\*•]\s*/, '').trim();
+            if (/^[A-Z][^:]{2,30}:\s*\*?\s*$/.test(bulletText)) {
+                // This is a sub-heading like "Land Degradation:*" or "Water Pollution:"
+                if (currentSection) sections.push(currentSection);
+                currentSection = {
+                    title: cleanMarkdown(bulletText.replace(/:\s*\*?\s*$/, '')),
+                    bullets: []
+                };
+                continue;
+            }
+
+            // Regular bullet or text
+            if (line.startsWith('-') || line.startsWith('*') || line.startsWith('•')) {
+                if (!currentSection) {
+                    currentSection = { title: 'Details', bullets: [] };
+                }
+                var cleaned = cleanMarkdown(bulletText);
+                if (cleaned && cleaned !== '--' && cleaned !== '-') {
+                    currentSection.bullets.push(cleaned);
+                }
+            } else if (currentSection) {
+                var cleanedLine = cleanMarkdown(line);
+                if (cleanedLine) currentSection.bullets.push(cleanedLine);
+            }
+        }
+        if (currentSection) sections.push(currentSection);
+        return sections;
+    }
+
+    function findEnvSection(sections, keyword) {
+        for (var i = 0; i < sections.length; i++) {
+            if (sections[i].title.toLowerCase().indexOf(keyword) !== -1) {
+                return sections[i];
+            }
+        }
+        return null;
     }
 
     function findSection(sections, keyword) {
