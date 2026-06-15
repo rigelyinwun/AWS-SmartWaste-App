@@ -9,7 +9,7 @@
 <body>
     <header>
         <div class="header-content">
-            <h1>♻️ SmartWaste</h1>
+            <h1><img src="images/logo.png" alt="SmartWaste logo" class="header-logo">SmartWaste</h1>
             <p class="subtitle">AI-Powered Waste Analysis & Disposal Guide</p>
         </div>
     </header>
@@ -21,7 +21,8 @@
                 <h2>Upload Waste Image</h2>
                 <span class="badge required">Required</span>
             </div>
-            <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" style="position:absolute;left:-9999px">
+            <label for="fileInput" class="sr-only">Upload waste image</label>
+            <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" class="sr-only" title="Upload waste image">
             <div class="upload-zone" id="uploadZone">
                 <div class="upload-icon">⬆️</div>
                 <p class="upload-text">Please upload your waste image</p>
@@ -58,7 +59,7 @@
         </div>
 
         <!-- Widget 4 & 5: Waste Details and Further Actions -->
-        <div class="output-row">
+        <div class="output-row" id="outputSection" hidden>
             <section class="widget output-widget">
                 <div class="widget-header ai-header">
                     <h2>✨ Waste Details</h2>
@@ -76,27 +77,40 @@
                     <div class="placeholder-text">Upload an image and click Analyze to see results</div>
                 </div>
             </section>
+
+            <!-- Widget 6: Environmental Impact -->
+            <section class="widget output-widget full-width">
+                <div class="widget-header ai-header">
+                    <h2>✨ Environmental Impact</h2>
+                </div>
+                <div class="output-panel" id="environmentalImpactPanel">
+                    <div class="placeholder-text">Upload an image and click Analyze to see results</div>
+                </div>
+            </section>
         </div>
 
-        <!-- Widget 6: Environmental Impact -->
-        <section class="widget output-widget full-width">
-            <div class="widget-header ai-header">
-                <h2>✨ Environmental Impact</h2>
-            </div>
-            <div class="output-panel" id="environmentalImpactPanel">
-                <div class="placeholder-text">Upload an image and click Analyze to see results</div>
-            </div>
-        </section>
+        <!-- Widget 7: SmartWaste Assistant (Floating Chatbot) -->
+    </main>
 
-        <!-- Widget 7: SmartWaste Assistant -->
-        <section class="widget chat-widget">
-            <div class="widget-header ai-header">
-                <h2>✨ SmartWaste Assistant</h2>
-            </div>
-            <div class="chat-container" id="chatContainer">
-                <div class="chat-message assistant">
-                    <div class="message-content">
-                        Hi! I'm your SmartWaste Assistant, here to help you dispose of waste correctly and save the environment. 🌍♻️
+    <!-- Floating Chat Button -->
+    <div class="chat-bubble-hint" id="chatBubbleHint">
+        <span>Need help from AI assistant?</span>
+        <button type="button" class="bubble-close" id="closeBubbleHint">&times;</button>
+    </div>
+    <button type="button" class="chat-fab" id="chatFab" aria-label="Open chat assistant">
+        <img src="images/logo.png" alt="SmartWaste Assistant">
+    </button>
+
+    <!-- Chat Popup Window -->
+    <div class="chat-popup" id="chatPopup">
+        <div class="chat-popup-header">
+            <img src="images/logo.png" alt="logo" class="chat-popup-logo">
+            <span>SmartWaste Assistant</span>
+            <button type="button" class="chat-popup-close" id="chatPopupClose">&times;</button>
+        </div>
+        <div class="chat-container" id="chatContainer">
+            <div class="chat-message assistant">
+                <div class="message-content">Hi! I'm your SmartWaste Assistant, here to help you dispose of waste correctly and save the environment. 🌍♻️
 
 You can ask me about:
 • Specific waste disposal questions
@@ -106,16 +120,14 @@ You can ask me about:
 • Finding local disposal facilities
 • Eco-friendly alternatives to common items
 
-What would you like to know about waste disposal?
-                    </div>
-                </div>
+What would you like to know about waste disposal?</div>
             </div>
-            <div class="chat-input-area">
-                <input type="text" id="chatInput" placeholder="Ask about waste disposal..." />
-                <button class="btn-send" id="chatSend">➤</button>
-            </div>
-        </section>
-    </main>
+        </div>
+        <div class="chat-input-area">
+            <input type="text" id="chatInput" placeholder="Ask about waste disposal..." aria-label="Chat message input" />
+            <button type="button" class="btn-send" id="chatSend">➤</button>
+        </div>
+    </div>
 
     <footer>
         <p>SmartWaste — Powered by Amazon Bedrock & Claude</p>
