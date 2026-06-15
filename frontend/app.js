@@ -343,16 +343,25 @@
             // Check if this bullet ends with :* (sub-heading)
             var isColonParent = /:\s*\*?\s*$/.test(bullet);
 
-            if (isColonParent) {
-                var label = bullet.replace(/:\s*\*?\s*$/, '');
+            // Check if this is an ALL-CAPS or mostly-caps short label (was a numbered parent)
+            // e.g. "REUSE", "REFUSE/REDUCE (Primary Strategy)", "AVOID (Do Not Do)"
+            var isCapsParent = /^[A-Z][A-Z\s\/\-]{2,}/.test(bullet) && bullet.length < 60;
+
+            if (isColonParent || isCapsParent) {
+                var label = bullet;
+                if (isColonParent) {
+                    label = bullet.replace(/:\s*\*?\s*$/, '');
+                }
                 html += '<li><strong>' + escapeHtml(label) + '</strong>';
 
-                // Collect child bullets until next colon parent
+                // Collect child bullets until next parent
                 var children = [];
                 i++;
                 while (i < bullets.length) {
-                    if (/:\s*\*?\s*$/.test(bullets[i])) break;
-                    children.push(bullets[i]);
+                    var next = bullets[i];
+                    if (/:\s*\*?\s*$/.test(next)) break;
+                    if (/^[A-Z][A-Z\s\/\-]{2,}/.test(next) && next.length < 60) break;
+                    children.push(next);
                     i++;
                 }
                 if (children.length > 0) {
