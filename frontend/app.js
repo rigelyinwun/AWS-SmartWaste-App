@@ -297,6 +297,16 @@
         return null;
     }
 
+    function cleanMarkdown(text) {
+        // Remove ** bold markers
+        text = text.replace(/\*\*(.+?)\*\*/g, '$1');
+        // Remove * italic markers
+        text = text.replace(/\*(.+?)\*/g, '$1');
+        // Remove standalone -- or ---
+        text = text.replace(/^-{2,}$/g, '').trim();
+        return text;
+    }
+
     function extractDecomposition(text) {
         // Try various patterns the AI might use
         var patterns = [
@@ -344,21 +354,27 @@
             var line = lines[i].trim();
             if (!line) continue;
 
+            // Skip standalone dashes
+            if (/^-{2,}$/.test(line)) continue;
+
             if (line.startsWith('##') || line.startsWith('# ')) {
                 if (currentSection) sections.push(currentSection);
                 currentSection = {
-                    title: line.replace(/^#+\s*/, ''),
+                    title: cleanMarkdown(line.replace(/^#+\s*/, '')),
                     bullets: []
                 };
-            } else if (line.startsWith('-') || line.startsWith('*')) {
+            } else if (line.startsWith('-') || line.startsWith('*') || line.startsWith('•')) {
                 if (!currentSection) {
                     currentSection = { title: 'Details', bullets: [] };
                 }
-                currentSection.bullets.push(line.replace(/^[\-\*]\s*/, ''));
+                var bullet = cleanMarkdown(line.replace(/^[\-\*•]\s*/, ''));
+                if (bullet && bullet !== '--' && bullet !== '-') {
+                    currentSection.bullets.push(bullet);
+                }
             } else if (line.indexOf(':') > 0 && currentSection) {
-                currentSection.bullets.push(line);
+                currentSection.bullets.push(cleanMarkdown(line));
             } else if (currentSection) {
-                currentSection.bullets.push(line);
+                currentSection.bullets.push(cleanMarkdown(line));
             }
         }
         if (currentSection) sections.push(currentSection);
