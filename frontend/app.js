@@ -252,7 +252,7 @@
             html += '</div>';
         }
 
-        // Remaining sections: simple text cards
+        // Remaining sections: simple text cards with nested sub-headings
         var handledTitles = [];
         if (identification) handledTitles.push(identification.title);
         if (landImpact) handledTitles.push(landImpact.title);
@@ -264,15 +264,46 @@
             if (sections[si].bullets.length === 0) continue;
             html += '<div class="env-section-block">';
             html += '<div class="env-section-heading">' + escapeHtml(sections[si].title) + '</div>';
-            html += '<ul class="env-list">';
-            for (var sb = 0; sb < sections[si].bullets.length; sb++) {
-                html += '<li>' + escapeHtml(sections[si].bullets[sb]) + '</li>';
-            }
-            html += '</ul>';
+            html += renderNestedBullets(sections[si].bullets);
             html += '</div>';
         }
 
         html += '</div>';
+        return html;
+    }
+
+    // Render bullets with nested sub-headings (items ending with :* become bold parents)
+    function renderNestedBullets(bullets) {
+        var html = '<ul class="env-list">';
+        var i = 0;
+        while (i < bullets.length) {
+            var bullet = bullets[i];
+            // Check if this bullet is a sub-heading (ends with :* or just : with next items as children)
+            if (/:\s*\*?\s*$/.test(bullet)) {
+                // This is a parent/sub-heading
+                var label = bullet.replace(/:\s*\*?\s*$/, '');
+                html += '<li><strong>' + escapeHtml(label) + '</strong>';
+                // Collect child bullets until next sub-heading or end
+                var children = [];
+                i++;
+                while (i < bullets.length && !/:\s*\*?\s*$/.test(bullets[i])) {
+                    children.push(bullets[i]);
+                    i++;
+                }
+                if (children.length > 0) {
+                    html += '<ul class="env-list-nested">';
+                    for (var c = 0; c < children.length; c++) {
+                        html += '<li>' + escapeHtml(children[c]) + '</li>';
+                    }
+                    html += '</ul>';
+                }
+                html += '</li>';
+            } else {
+                html += '<li>' + escapeHtml(bullet) + '</li>';
+                i++;
+            }
+        }
+        html += '</ul>';
         return html;
     }
 
@@ -281,13 +312,15 @@
         var lines = text.split('\n');
         var sections = [];
         var currentSection = null;
+        // Keywords that indicate a top-level environmental sub-section to split on
+        var splitKeywords = ['land', 'water', 'wildlife'];
 
         for (var i = 0; i < lines.length; i++) {
             var line = lines[i].trim();
             if (!line) continue;
             if (/^-{2,}$/.test(line)) continue;
 
-            // Markdown headers
+            // Markdown headers always start new sections
             if (line.startsWith('#')) {
                 if (currentSection) sections.push(currentSection);
                 currentSection = {
@@ -297,28 +330,41 @@
                 continue;
             }
 
-            // Bullet that ends with :* or : (sub-heading within a section)
-            var bulletText = line.replace(/^[\-\*•]\s*/, '').trim();
-            if (/^[A-Z][^:]{2,30}:\s*\*?\s*$/.test(bulletText)) {
-                // This is a sub-heading like "Land Degradation:*" or "Water Pollution:"
-                if (currentSection) sections.push(currentSection);
-                currentSection = {
-                    title: cleanMarkdown(bulletText.replace(/:\s*\*?\s*$/, '')),
-                    bullets: []
-                };
-                continue;
+            // Check if it's a bullet
+            var isBullet = /^[\-\*•]/.test(line);
+            var bulletText = isBullet ? line.replace(/^[\-\*•]\s*/, '').trim() : line;
+
+            // Check if this bullet is a top-level split keyword (like "Land Degradation:*")
+            if (isBullet && /^[A-Z]/.test(bulletText) && /:\s*\*?\s*$/.test(bulletText)) {
+                var label = bulletText.replace(/:\s*\*?\s*$/, '').toLowerCase();
+                var shouldSplit = false;
+                for (var k = 0; k < splitKeywords.length; k++) {
+                    if (label.indexOf(splitKeywords[k]) !== -1) {
+                        shouldSplit = true;
+                        break;
+                    }
+                }
+                if (shouldSplit) {
+                    if (currentSection) sections.push(currentSection);
+                    currentSection = {
+                        title: cleanMarkdown(bulletText.replace(/:\s*\*?\s*$/, '')),
+                        bullets: []
+                    };
+                    continue;
+                }
             }
 
-            // Regular bullet or text
-            if (line.startsWith('-') || line.startsWith('*') || line.startsWith('•')) {
-                if (!currentSection) {
-                    currentSection = { title: 'Details', bullets: [] };
-                }
+            // Regular content — add to current section
+            if (!currentSection) {
+                currentSection = { title: 'Details', bullets: [] };
+            }
+
+            if (isBullet) {
                 var cleaned = cleanMarkdown(bulletText);
                 if (cleaned && cleaned !== '--' && cleaned !== '-') {
                     currentSection.bullets.push(cleaned);
                 }
-            } else if (currentSection) {
+            } else {
                 var cleanedLine = cleanMarkdown(line);
                 if (cleanedLine) currentSection.bullets.push(cleanedLine);
             }

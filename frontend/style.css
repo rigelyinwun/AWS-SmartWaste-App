@@ -528,6 +528,17 @@ main {
     margin-bottom: 0.25rem;
 }
 
+.env-list-nested {
+    list-style: circle;
+    padding-left: 1.25rem;
+    margin-top: 0.25rem;
+    font-size: 0.85rem;
+}
+
+.env-list-nested li {
+    margin-bottom: 0.15rem;
+}
+
 @media (max-width: 768px) {
     .env-row {
         grid-template-columns: 1fr;
