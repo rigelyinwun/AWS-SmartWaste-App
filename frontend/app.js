@@ -87,27 +87,47 @@
         for (var i = 0; i < lines.length; i++) {
             var line = lines[i].trim();
             if (!line) continue;
-            if (line.startsWith('##') || line.startsWith('#')) continue;
 
-            // Check for "Label: Value" pattern
+            // Skip markdown headers but use them as context
+            if (line.startsWith('#')) continue;
+
+            // Bullet points - append to current value
+            if (line.startsWith('-') || line.startsWith('*') || line.startsWith('•')) {
+                var bulletText = line.replace(/^[\-\*•]\s*/, '').trim();
+                if (bulletText) {
+                    currentValue += (currentValue ? '<br>' : '') + '\u2022 ' + escapeHtml(bulletText);
+                }
+                continue;
+            }
+
+            // Check for "Label: Value" pattern (colon within first 40 chars)
             var colonIndex = line.indexOf(':');
-            if (colonIndex > 0 && colonIndex < 30 && !line.startsWith('-') && !line.startsWith('*')) {
+            if (colonIndex > 0 && colonIndex < 40) {
+                // Save previous row
                 if (currentLabel) {
                     rows.push({ label: currentLabel, value: currentValue.trim() });
                 }
-                currentLabel = line.substring(0, colonIndex).trim();
-                currentValue = line.substring(colonIndex + 1).trim();
-            } else if (line.startsWith('-') || line.startsWith('*')) {
-                currentValue += '<br>\u2022 ' + escapeHtml(line.substring(1).trim());
-            } else {
-                currentValue += ' ' + escapeHtml(line);
+                currentLabel = line.substring(0, colonIndex).trim().replace(/^\*\*|\*\*$/g, '');
+                currentValue = escapeHtml(line.substring(colonIndex + 1).trim());
+            } else if (currentLabel) {
+                // Continuation of previous value
+                currentValue += (currentValue ? ' ' : '') + escapeHtml(line);
             }
         }
+        // Push last row
         if (currentLabel) {
             rows.push({ label: currentLabel, value: currentValue.trim() });
         }
 
-        if (rows.length === 0) return '<div class="md-line">' + escapeHtml(text) + '</div>';
+        if (rows.length === 0) {
+            // Fallback: just render as markdown
+            var fallback = '';
+            for (var f = 0; f < lines.length; f++) {
+                var html = renderMarkdownLine(lines[f]);
+                if (html) fallback += html;
+            }
+            return fallback || escapeHtml(text);
+        }
 
         var html = '<table class="waste-table">';
         for (var j = 0; j < rows.length; j++) {
@@ -173,18 +193,9 @@
         var sections = parseSections(text);
         var html = '<div class="env-impact-layout">';
 
-        // Try to extract key data from sections
+        // Try to extract key data
         var identification = findSection(sections, 'identification');
         var decomposition = extractDecomposition(text);
-        var lifecycle = findSection(sections, 'lifecycle');
-        var landImpact = findSection(sections, 'land');
-        var waterImpact = findSection(sections, 'water');
-        var wildlifeImpact = findSection(sections, 'wildlife');
-        var climateImpact = findSection(sections, 'climate');
-        var futureImpact = findSection(sections, 'future');
-        var healthImpact = findSection(sections, 'health');
-        var recommendation = findSection(sections, 'recommendation');
-        var educational = findSection(sections, 'educational');
 
         // Row 1: Identification + Decomposition Time
         html += '<div class="env-row env-row-top">';
@@ -208,34 +219,17 @@
         }
         html += '</div>';
 
-        // Row 2: Material & Lifecycle (process chart)
-        if (lifecycle) {
-            html += '<div class="env-section-block">';
-            html += '<div class="env-section-heading">Material & Lifecycle Overview</div>';
-            html += '<div class="env-lifecycle-chart">';
-            for (var l = 0; l < lifecycle.bullets.length && l < 4; l++) {
-                if (l > 0) html += '<div class="env-lifecycle-arrow">→</div>';
-                html += '<div class="env-lifecycle-step">' + escapeHtml(lifecycle.bullets[l]) + '</div>';
-            }
-            html += '</div>';
-            if (lifecycle.bullets.length > 4) {
-                html += '<ul class="env-list">';
-                for (var lb = 4; lb < lifecycle.bullets.length; lb++) {
-                    html += '<li>' + escapeHtml(lifecycle.bullets[lb]) + '</li>';
-                }
-                html += '</ul>';
-            }
-            html += '</div>';
-        }
-
-        // Row 3: Land / Water / Wildlife impact with images
+        // Row 2: Impact images (land/water/wildlife) if present
+        var landImpact = findSection(sections, 'land');
+        var waterImpact = findSection(sections, 'water');
+        var wildlifeImpact = findSection(sections, 'wildlife');
         var hasAnyImpact = landImpact || waterImpact || wildlifeImpact;
+
         if (hasAnyImpact) {
             html += '<div class="env-section-block">';
             html += '<div class="env-section-heading">Environmental Impact</div>';
             html += '<div class="env-impact-grid">';
 
-            // Land
             if (landImpact) {
                 html += '<div class="env-impact-card">';
                 html += '<img src="images/landfill.jpg" alt="Land impact" class="env-impact-img">';
@@ -248,7 +242,6 @@
                 html += '</div>';
             }
 
-            // Water
             if (waterImpact) {
                 html += '<div class="env-impact-card">';
                 html += '<img src="images/water.jpeg" alt="Water impact" class="env-impact-img">';
@@ -261,7 +254,6 @@
                 html += '</div>';
             }
 
-            // Wildlife
             if (wildlifeImpact) {
                 html += '<div class="env-impact-card">';
                 html += '<img src="images/wildlife.jpg" alt="Wildlife impact" class="env-impact-img">';
@@ -274,83 +266,22 @@
                 html += '</div>';
             }
 
-            html += '</div>'; // end env-impact-grid
-            html += '</div>'; // end section-block
-        }
-
-        // Row 4: Climate Impact
-        if (climateImpact) {
-            html += '<div class="env-section-block">';
-            html += '<div class="env-section-heading">Climate Impact</div>';
-            html += '<div class="env-climate-grid">';
-            for (var ci = 0; ci < climateImpact.bullets.length; ci++) {
-                html += '<div class="env-climate-item">' + escapeHtml(climateImpact.bullets[ci]) + '</div>';
-            }
             html += '</div>';
             html += '</div>';
         }
 
-        // Row 5: Future Impact
-        if (futureImpact) {
-            html += '<div class="env-section-block">';
-            html += '<div class="env-section-heading">Future Impact Insight</div>';
-            html += '<ul class="env-list">';
-            for (var fi = 0; fi < futureImpact.bullets.length; fi++) {
-                html += '<li>' + escapeHtml(futureImpact.bullets[fi]) + '</li>';
-            }
-            html += '</ul>';
-            html += '</div>';
-        }
-
-        // Row 6: Human Health
-        if (healthImpact) {
-            html += '<div class="env-section-block">';
-            html += '<div class="env-section-heading">Human Health Impact</div>';
-            html += '<ul class="env-list">';
-            for (var hi = 0; hi < healthImpact.bullets.length; hi++) {
-                html += '<li>' + escapeHtml(healthImpact.bullets[hi]) + '</li>';
-            }
-            html += '</ul>';
-            html += '</div>';
-        }
-
-        // Row 7: Recommendation
-        if (recommendation) {
-            html += '<div class="env-section-block">';
-            html += '<div class="env-section-heading">Waste Management Recommendation</div>';
-            html += '<ul class="env-list">';
-            for (var ri = 0; ri < recommendation.bullets.length; ri++) {
-                html += '<li>' + escapeHtml(recommendation.bullets[ri]) + '</li>';
-            }
-            html += '</ul>';
-            html += '</div>';
-        }
-
-        // Row 8: Educational
-        if (educational) {
-            html += '<div class="env-section-block">';
-            html += '<div class="env-section-heading">Educational Insight</div>';
-            html += '<ul class="env-list">';
-            for (var ei = 0; ei < educational.bullets.length; ei++) {
-                html += '<li>' + escapeHtml(educational.bullets[ei]) + '</li>';
-            }
-            html += '</ul>';
-            html += '</div>';
-        }
-
-        // Fallback: any sections not matched
-        var matched = [identification, lifecycle, landImpact, waterImpact, wildlifeImpact, climateImpact, futureImpact, healthImpact, recommendation, educational];
+        // Remaining sections: simple text cards
+        var handled = [identification, landImpact, waterImpact, wildlifeImpact];
         for (var si = 0; si < sections.length; si++) {
-            if (matched.indexOf(sections[si]) === -1) {
-                html += '<div class="env-section-block">';
-                html += '<div class="env-section-heading">' + escapeHtml(sections[si].title) + '</div>';
-                html += '<ul class="env-list">';
-                for (var sb = 0; sb < sections[si].bullets.length; sb++) {
-                    html += '<li>' + escapeHtml(sections[si].bullets[sb]) + '</li>';
-                }
-                html += '</ul>';
-                html += '</div>';
+            if (handled.indexOf(sections[si]) !== -1) continue;
+            html += '<div class="env-section-block">';
+            html += '<div class="env-section-heading">' + escapeHtml(sections[si].title) + '</div>';
+            html += '<ul class="env-list">';
+            for (var sb = 0; sb < sections[si].bullets.length; sb++) {
+                html += '<li>' + escapeHtml(sections[si].bullets[sb]) + '</li>';
             }
+            html += '</ul>';
+            html += '</div>';
         }
 
         html += '</div>';
