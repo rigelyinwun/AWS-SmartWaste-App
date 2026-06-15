@@ -539,6 +539,30 @@ main {
     margin-bottom: 0.15rem;
 }
 
+/* Env markdown table */
+.env-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    margin: 0.75rem 0;
+}
+
+.env-table th,
+.env-table td {
+    border: 1px solid #ddd;
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+}
+
+.env-table th {
+    background: #f0f0f0;
+    font-weight: 700;
+}
+
+.env-table tr:nth-child(even) {
+    background: #fafafa;
+}
+
 @media (max-width: 768px) {
     .env-row {
         grid-template-columns: 1fr;

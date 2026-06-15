@@ -272,22 +272,95 @@
         return html;
     }
 
-    // Render bullets with nested sub-headings (items ending with :* become bold parents)
+    // Render bullets with nested sub-headings (items ending with :* or numbered items become bold parents)
     function renderNestedBullets(bullets) {
+        var html = '';
+        var i = 0;
+
+        // First check if there's a markdown table in the bullets
+        var tableStart = -1;
+        for (var t = 0; t < bullets.length; t++) {
+            if (bullets[t].indexOf('|') !== -1 && bullets[t].trim().startsWith('|')) {
+                tableStart = t;
+                break;
+            }
+        }
+
+        // Render any bullets before the table
+        var preBullets = tableStart === -1 ? bullets : bullets.slice(0, tableStart);
+        var postBullets = tableStart === -1 ? [] : bullets.slice(tableStart);
+
+        if (preBullets.length > 0) {
+            html += renderNestedList(preBullets);
+        }
+
+        // Render markdown table if found
+        if (postBullets.length > 0) {
+            var tableRows = [];
+            var afterTable = [];
+            var inTable = true;
+            for (var tb = 0; tb < postBullets.length; tb++) {
+                var row = postBullets[tb].trim();
+                if (inTable && row.indexOf('|') !== -1 && row.startsWith('|')) {
+                    // Skip separator rows like |---|---|
+                    if (/^\|[\s\-:|]+\|$/.test(row)) continue;
+                    tableRows.push(row);
+                } else {
+                    inTable = false;
+                    afterTable.push(postBullets[tb]);
+                }
+            }
+
+            if (tableRows.length > 0) {
+                html += '<table class="env-table">';
+                for (var tr = 0; tr < tableRows.length; tr++) {
+                    var cells = tableRows[tr].split('|').filter(function(c) { return c.trim() !== ''; });
+                    var tag = tr === 0 ? 'th' : 'td';
+                    html += '<tr>';
+                    for (var tc = 0; tc < cells.length; tc++) {
+                        html += '<' + tag + '>' + escapeHtml(cells[tc].trim()) + '</' + tag + '>';
+                    }
+                    html += '</tr>';
+                }
+                html += '</table>';
+            }
+
+            if (afterTable.length > 0) {
+                html += renderNestedList(afterTable);
+            }
+        }
+
+        return html;
+    }
+
+    // Render a list with parent/child nesting
+    function renderNestedList(bullets) {
         var html = '<ul class="env-list">';
         var i = 0;
         while (i < bullets.length) {
             var bullet = bullets[i];
-            // Check if this bullet is a sub-heading (ends with :* or just : with next items as children)
-            if (/:\s*\*?\s*$/.test(bullet)) {
-                // This is a parent/sub-heading
-                var label = bullet.replace(/:\s*\*?\s*$/, '');
+
+            // Check if this is a numbered parent like "1. REUSE ✓ (Best Option)"
+            var isNumberedParent = /^\d+\.\s+[A-Z]/.test(bullet);
+
+            // Check if this bullet ends with :* (sub-heading)
+            var isColonParent = /:\s*\*?\s*$/.test(bullet);
+
+            if (isNumberedParent || isColonParent) {
+                var label = bullet;
+                if (isColonParent) {
+                    label = bullet.replace(/:\s*\*?\s*$/, '');
+                }
                 html += '<li><strong>' + escapeHtml(label) + '</strong>';
-                // Collect child bullets until next sub-heading or end
+
+                // Collect child bullets until next parent
                 var children = [];
                 i++;
-                while (i < bullets.length && !/:\s*\*?\s*$/.test(bullets[i])) {
-                    children.push(bullets[i]);
+                while (i < bullets.length) {
+                    var next = bullets[i];
+                    // Stop if we hit another numbered parent or colon parent
+                    if (/^\d+\.\s+[A-Z]/.test(next) || /:\s*\*?\s*$/.test(next)) break;
+                    children.push(next);
                     i++;
                 }
                 if (children.length > 0) {
