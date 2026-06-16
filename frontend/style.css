@@ -197,7 +197,7 @@ main {
 }
 
 .btn-run {
-    background: linear-gradient(135deg, var(--primary), var(--primary-light));
+    background: var(--primary);
     color: white;
     border: none;
     padding: 0.9rem 2.5rem;
