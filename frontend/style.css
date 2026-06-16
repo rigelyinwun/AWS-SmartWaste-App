@@ -5,17 +5,17 @@
 }
 
 :root {
-    --primary: #568d59;
-    --primary-light: #b8edba;
-    --primary-dark: #5c9260;
-    --accent: #c6ff00;
-    --bg: #f5f7f5;
+    --primary: #2e7d32;
+    --primary-light: #e8f5e9;
+    --primary-dark: #1b5e20;
+    --accent: #4caf50;
+    --bg: #f4f8f6;
     --card-bg: #ffffff;
-    --text: #1a1a1a;
-    --text-muted: #666;
-    --border: #e0e0e0;
-    --radius: 12px;
-    --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    --text: #1a2a1a;
+    --text-muted: #777;
+    --border: #d4e4d8;
+    --radius: 16px;
+    --shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
     --highlight: #fff176;
 }
 
@@ -28,19 +28,20 @@ body {
 }
 
 header {
-    background: var(--primary-light);
-    color: var(--primary-dark);
-    padding: 1rem 2rem;
+    background: linear-gradient(135deg, #1b5e20, #2e7d32);
+    color: white;
+    padding: 1.25rem 2rem;
     text-align: center;
 }
 
 .header-content h1 {
-    font-size: 2rem;
-    margin-bottom: 0.25rem;
+    font-size: 1.6rem;
+    margin-bottom: 0.15rem;
+    color: white;
 }
 
 .header-logo {
-    height: 2rem;
+    height: 1.8rem;
     vertical-align: middle;
     margin-right: 0.5rem;
 }
@@ -51,8 +52,9 @@ header {
 }
 
 .subtitle {
-    opacity: 0.9;
-    font-size: 1rem;
+    opacity: 0.8;
+    font-size: 0.9rem;
+    color: #c8e6c9;
 }
 
 main {
@@ -76,60 +78,64 @@ main {
 .widget-header {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 1rem 1.25rem;
-    border-bottom: 1px solid var(--border);
-    background: #fafafa;
+    justify-content: space-between;
+    padding: 0.9rem 1.25rem;
+    border-bottom: 3px solid var(--primary);
 }
 
 .widget-header h2 {
-    font-size: 1rem;
+    font-size: 0.95rem;
     font-weight: 600;
+    color: var(--text);
 }
 
 .ai-header {
-    background: linear-gradient(90deg, #e8f5e9, #f1f8e9);
+    border-bottom-color: var(--primary);
+    background: transparent;
 }
 
 .badge {
-    font-size: 0.7rem;
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    font-weight: 500;
+    font-size: 0.65rem;
+    padding: 0.25rem 0.6rem;
+    border-radius: 12px;
+    font-weight: 600;
     text-transform: uppercase;
+    letter-spacing: 0.5px;
 }
 
 .badge.required {
-    background: #fff3e0;
-    color: #e65100;
+    background: #ef5350;
+    color: white;
 }
 
 .badge.optional {
-    background: #e3f2fd;
-    color: #1565c0;
+    background: var(--primary);
+    color: white;
 }
 
 /* Upload zone */
 .upload-zone {
     display: block;
-    padding: 3rem 2rem;
+    padding: 2.5rem 2rem;
     text-align: center;
-    border: 2px dashed var(--border);
+    border: 2px dashed var(--primary);
     margin: 1.25rem;
-    border-radius: 8px;
+    border-radius: 12px;
     cursor: pointer;
+    background: var(--primary-light);
     transition: border-color 0.2s, background 0.2s;
 }
 
 .upload-zone:hover,
 .upload-zone.dragover {
-    border-color: var(--primary-light);
-    background: #e8f5e9;
+    border-color: var(--accent);
+    background: #b2dfdb;
 }
 
 .upload-icon {
     font-size: 2.5rem;
-    margin-bottom: 0.75rem;
+    margin-bottom: 0.5rem;
+    color: var(--primary);
 }
 
 .upload-text {
@@ -177,18 +183,22 @@ main {
 }
 
 .input-widget textarea {
-    width: 100%;
-    padding: 1rem 1.25rem;
-    border: none;
+    width: calc(100% - 2.5rem);
+    margin: 1rem 1.25rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
     resize: vertical;
     font-family: inherit;
-    font-size: 0.95rem;
-    min-height: 80px;
+    font-size: 0.9rem;
+    min-height: 70px;
+    background: #fafffe;
 }
 
 .input-widget textarea:focus {
     outline: none;
-    background: #f9fef9;
+    border-color: var(--primary);
+    background: #fff;
 }
 
 /* Run button */
@@ -200,10 +210,10 @@ main {
     background: var(--primary);
     color: white;
     border: none;
-    padding: 0.9rem 2.5rem;
-    font-size: 1.1rem;
+    padding: 0.85rem 2.5rem;
+    font-size: 1rem;
     font-weight: 600;
-    border-radius: 8px;
+    border-radius: 24px;
     cursor: pointer;
     transition: transform 0.1s, box-shadow 0.2s;
     box-shadow: 0 4px 12px rgba(46, 125, 50, 0.3);
