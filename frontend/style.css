@@ -122,7 +122,7 @@ main {
     margin: 1.25rem;
     border-radius: 12px;
     cursor: pointer;
-    background: #c3e8c7;
+    background: #ccedd0;
     transition: border-color 0.2s, background 0.2s;
 }
 
