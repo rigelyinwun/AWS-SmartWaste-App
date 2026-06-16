@@ -7,7 +7,7 @@
 :root {
     --primary: #2e7d32;
     --primary-light: #a2d7a7;
-    --primary-dark: #1b5e20;
+    --primary-dark: #1a5d1e;
     --accent: #4caf50;
     --bg: #f4f8f6;
     --card-bg: #ffffff;
@@ -122,7 +122,7 @@ main {
     margin: 1.25rem;
     border-radius: 12px;
     cursor: pointer;
-    background: #ccedd0;
+    background: #d2eed6;
     transition: border-color 0.2s, background 0.2s;
 }
 
