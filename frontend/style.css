@@ -6,7 +6,7 @@
 
 :root {
     --primary: #2e7d32;
-    --primary-light: #e8f5e9;
+    --primary-light: #a2d7a7;
     --primary-dark: #1b5e20;
     --accent: #4caf50;
     --bg: #f4f8f6;
@@ -28,8 +28,8 @@ body {
 }
 
 header {
-    background: linear-gradient(135deg, #1b5e20, #2e7d32);
-    color: white;
+    background: var(--primary-light);
+    color: var(--primary-dark);
     padding: 1.25rem 2rem;
     text-align: center;
 }
@@ -37,7 +37,7 @@ header {
 .header-content h1 {
     font-size: 1.6rem;
     margin-bottom: 0.15rem;
-    color: white;
+    color: var(--primary-dark);
 }
 
 .header-logo {
@@ -52,9 +52,9 @@ header {
 }
 
 .subtitle {
-    opacity: 0.8;
+    opacity: 0.9;
     font-size: 0.9rem;
-    color: #c8e6c9;
+    color: var(--primary-dark);
 }
 
 main {
