@@ -6,7 +6,7 @@
 
 :root {
     --primary: #2e7d32;
-    --primary-light: #a2d7a7;
+    --primary-light: #b7e8bc;
     --primary-dark: #1a5d1e;
     --accent: #4caf50;
     --bg: #f4f8f6;
@@ -122,7 +122,7 @@ main {
     margin: 1.25rem;
     border-radius: 12px;
     cursor: pointer;
-    background: #d2eed6;
+    background: #e0f2e3;
     transition: border-color 0.2s, background 0.2s;
 }
 
