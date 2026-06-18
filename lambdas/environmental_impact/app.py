@@ -12,6 +12,16 @@ bedrock = boto3.client("bedrock-runtime", region_name="ap-southeast-1")
 
 MODEL_ID = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 
+VALIDATION_PROMPT = """Look at this image and optional description. Determine if the content is appropriate for a waste analysis app.
+
+Reply with ONLY one word:
+- "VALID" if the image shows a waste item, recyclable material, trash, garbage, or any object that could be disposed of
+- "INVALID" if the image contains offensive, harmful, inappropriate, violent, sexual content, or is completely unrelated to waste (e.g. selfies, memes, random screenshots, landscapes with no waste items)
+
+Also check the description text. If it contains offensive, harmful, hateful, or inappropriate language, reply "INVALID".
+
+Reply with ONLY "VALID" or "INVALID", nothing else."""
+
 SYSTEM_PROMPT = """You are an environmental scientist specializing in waste impact analysis, lifecycle assessment (LCA), and climate sustainability. Analyze the waste item shown in the image with optional supporting context from the user description.
 
 Your task is to identify the waste item as accurately as possible and generate a scientifically grounded environmental and climate impact assessment tailored specifically to that item.
@@ -29,6 +39,31 @@ Provide analysis covering:
 - Educational Insight (2-3 concise facts)
 
 Use bullet points. Be scientifically accurate but understandable to the public."""
+
+REJECTION_MESSAGE = "⚠️ The uploaded image or description is not suitable for waste analysis. Please upload a clear photo of a waste item (e.g., plastic bottle, food packaging, electronics) and avoid inappropriate content. Try again with a relevant image."
+
+
+def validate_input(user_content):
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 10,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": user_content + [{"type": "text", "text": VALIDATION_PROMPT}]}],
+    }
+    try:
+        response = bedrock.invoke_model(
+            modelId=MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(body),
+        )
+        result = json.loads(response["body"].read())
+        reply = result.get("content", [{}])[0].get("text", "").strip().upper()
+        logger.info("Validation result: %s", reply)
+        return "VALID" in reply
+    except Exception as e:
+        logger.error("Validation error: %s", str(e))
+        return True
 
 
 @app.route("/", methods=["POST", "OPTIONS"], defaults={"path": ""})
@@ -62,6 +97,10 @@ def analyze(path):
             prompt_text += f"\n\nAdditional description: {description}"
 
         user_content.append({"type": "text", "text": prompt_text})
+
+        # Validate input
+        if not validate_input(user_content):
+            return Response(REJECTION_MESSAGE, content_type="text/plain; charset=utf-8")
 
         body = {
             "anthropic_version": "bedrock-2023-05-31",

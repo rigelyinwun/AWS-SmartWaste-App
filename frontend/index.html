@@ -134,6 +134,16 @@ What would you like to know about waste disposal?</div>
         <p>SmartWaste — Powered by Amazon Bedrock & Claude</p>
     </footer>
 
+    <!-- Invalid Input Popup -->
+    <div class="invalid-overlay" id="invalidOverlay">
+        <div class="invalid-modal">
+            <div class="invalid-icon">⚠️</div>
+            <h3>Invalid Upload</h3>
+            <p>The uploaded image or description is not suitable for waste analysis. Please upload a clear photo of a waste item and avoid inappropriate content.</p>
+            <button type="button" class="btn-invalid-close" id="invalidCloseBtn">Try Again</button>
+        </div>
+    </div>
+
     <script>
         // These placeholders are replaced by GitHub Actions during deployment
         var STREAM_URLS = {

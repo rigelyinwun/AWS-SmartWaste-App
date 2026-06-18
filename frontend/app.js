@@ -619,6 +619,15 @@
                 return reader.read().then(function(result) {
                     if (result.done) {
                         cursor.remove();
+
+                        // Check for rejection message
+                        if (fullText.indexOf('\u26a0\ufe0f') === 0 && fullText.indexOf('not suitable') !== -1) {
+                            showInvalidPopup();
+                            panel.innerHTML = '';
+                            document.getElementById('outputSection').hidden = true;
+                            return;
+                        }
+
                         // Replace with structured render
                         if (renderFn) {
                             panel.innerHTML = renderFn(fullText);
@@ -800,5 +809,21 @@
     function escapeHtml(text) {
         return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
+
+    // --- Invalid input popup ---
+    function showInvalidPopup() {
+        var overlay = document.getElementById('invalidOverlay');
+        overlay.classList.add('show');
+    }
+
+    document.getElementById('invalidCloseBtn').addEventListener('click', function() {
+        document.getElementById('invalidOverlay').classList.remove('show');
+    });
+
+    document.getElementById('invalidOverlay').addEventListener('click', function(e) {
+        if (e.target === this) {
+            this.classList.remove('show');
+        }
+    });
 
 })();

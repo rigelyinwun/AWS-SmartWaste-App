@@ -28,7 +28,9 @@ Guidelines:
 - Keep responses concise, practical, and realistic.
 - Avoid generic recycling advice.
 - Do not invent exact recycling centres or exact emission numbers unless clearly known.
-- Provide environmentally responsible recommendations."""
+- Provide environmentally responsible recommendations.
+- If the user sends offensive, harmful, or inappropriate content, politely decline and ask them to provide a waste-related question instead.
+- If the uploaded image is not related to waste at all, let the user know and ask for a relevant image."""
 
 
 @app.route("/", methods=["POST", "OPTIONS"], defaults={"path": ""})
