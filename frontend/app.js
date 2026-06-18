@@ -656,9 +656,6 @@
             return;
         }
 
-        // Show output section
-        document.getElementById('outputSection').hidden = false;
-
         runAllBtn.disabled = true;
         runAllBtn.textContent = '\u23f3 Analyzing...';
 
@@ -668,18 +665,49 @@
             description: descriptionInput.value.trim(),
         };
 
-        var promises = [
-            streamToPanel(STREAM_URLS.waste_details, baseBody, 'wasteDetailsPanel', renderWasteDetailsTable),
-            streamToPanel(STREAM_URLS.further_actions, {
-                file_data: fileData,
-                file_mime: fileMime,
-                description: descriptionInput.value.trim(),
-                location: locationInput.value.trim(),
-            }, 'furtherActionsPanel', renderFurtherActions),
-            streamToPanel(STREAM_URLS.environmental_impact, baseBody, 'environmentalImpactPanel', renderEnvironmentalImpact),
-        ];
+        // First call waste_details — it does validation
+        // Read full response to check if rejected before showing output
+        fetch(STREAM_URLS.waste_details, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(baseBody),
+        }).then(function(response) {
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+            return response.text();
+        }).then(function(wasteDetailsText) {
+            // Check for rejection
+            if (wasteDetailsText.indexOf('not suitable') !== -1 || wasteDetailsText.indexOf('INVALID') !== -1 || wasteDetailsText.indexOf('not appropriate') !== -1 || wasteDetailsText.indexOf('inappropriate') !== -1) {
+                showInvalidPopup();
+                runAllBtn.disabled = false;
+                runAllBtn.textContent = '\ud83d\udd0d Analyze Waste';
+                return;
+            }
 
-        Promise.all(promises.map(function(p) { return p.catch(function() {}); })).then(function() {
+            // Valid — show output section and render waste details
+            document.getElementById('outputSection').hidden = false;
+            var wastePanel = document.getElementById('wasteDetailsPanel');
+            wastePanel.innerHTML = renderWasteDetailsTable(wasteDetailsText);
+
+            // Now run further_actions and environmental_impact
+            var promises = [
+                streamToPanel(STREAM_URLS.further_actions, {
+                    file_data: fileData,
+                    file_mime: fileMime,
+                    description: descriptionInput.value.trim(),
+                    location: locationInput.value.trim(),
+                }, 'furtherActionsPanel', renderFurtherActions),
+                streamToPanel(STREAM_URLS.environmental_impact, baseBody, 'environmentalImpactPanel', renderEnvironmentalImpact),
+            ];
+
+            Promise.all(promises.map(function(p) { return p.catch(function() {}); })).then(function() {
+                runAllBtn.disabled = false;
+                runAllBtn.textContent = '\ud83d\udd0d Analyze Waste';
+            });
+        }).catch(function(err) {
+            document.getElementById('outputSection').hidden = false;
+            document.getElementById('wasteDetailsPanel').innerHTML = '<div class="error-message">\u26a0\ufe0f Error: ' + err.message + '</div>';
             runAllBtn.disabled = false;
             runAllBtn.textContent = '\ud83d\udd0d Analyze Waste';
         });
