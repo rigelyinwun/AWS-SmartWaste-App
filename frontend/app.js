@@ -678,7 +678,7 @@
             return response.text();
         }).then(function(wasteDetailsText) {
             // Check for rejection
-            if (wasteDetailsText.indexOf('not suitable') !== -1 || wasteDetailsText.indexOf('INVALID') !== -1 || wasteDetailsText.indexOf('not appropriate') !== -1 || wasteDetailsText.indexOf('inappropriate') !== -1) {
+            if (isRejectedResponse(wasteDetailsText)) {
                 showInvalidPopup();
                 runAllBtn.disabled = false;
                 runAllBtn.textContent = '\ud83d\udd0d Analyze Waste';
@@ -839,6 +839,34 @@
     }
 
     // --- Invalid input popup ---
+    function isRejectedResponse(text) {
+        var lower = text.toLowerCase();
+        var rejectPhrases = [
+            'not suitable',
+            'not a physical waste',
+            'cannot be analyzed as waste',
+            'not appropriate',
+            'clarification required',
+            'not a waste item',
+            'cannot analyze',
+            'not physical waste',
+            'digital icon',
+            'digital graphic',
+            'digital image',
+            'cannot be classified as waste',
+            'not related to waste',
+            'inappropriate',
+            'please provide an image of an actual',
+            'not a genuine waste',
+            'please upload',
+            'cannot identify a waste item'
+        ];
+        for (var i = 0; i < rejectPhrases.length; i++) {
+            if (lower.indexOf(rejectPhrases[i]) !== -1) return true;
+        }
+        return false;
+    }
+
     function showInvalidPopup() {
         var overlay = document.getElementById('invalidOverlay');
         overlay.classList.add('show');

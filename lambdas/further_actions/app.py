@@ -12,15 +12,23 @@ bedrock = boto3.client("bedrock-runtime", region_name="ap-southeast-1")
 
 MODEL_ID = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 
-VALIDATION_PROMPT = """Look at this image and optional description. Determine if the content is appropriate for a waste analysis app.
+VALIDATION_PROMPT = """You are a strict content validator for a waste disposal app. Look at this image and the description text carefully.
 
-Reply with ONLY one word:
-- "VALID" if the image shows a waste item, recyclable material, trash, garbage, or any object that could be disposed of
-- "INVALID" if the image contains offensive, harmful, inappropriate, violent, sexual content, or is completely unrelated to waste (e.g. selfies, memes, random screenshots, landscapes with no waste items)
+Reply with ONLY the word "VALID" or "INVALID":
 
-Also check the description text. If it contains offensive, harmful, hateful, or inappropriate language, reply "INVALID".
+Reply "VALID" ONLY if ALL of these are true:
+1. The image shows a REAL PHYSICAL object that exists in the real world (not a digital image, screenshot, icon, logo, meme, drawing, or digital graphic)
+2. The object could reasonably be disposed of as waste or recycled
+3. The description (if provided) is not offensive, hateful, violent, or inappropriate
 
-Reply with ONLY "VALID" or "INVALID", nothing else."""
+Reply "INVALID" if ANY of these are true:
+1. The image is a screenshot, digital graphic, icon, logo, meme, cartoon, or drawing
+2. The image shows people (selfies, portraits), violence, sexual content, or offensive material
+3. The image is completely unrelated to physical waste items
+4. The description contains offensive, hateful, violent, inappropriate, or vulgar language
+5. The image is of a landscape, building, or scene with no identifiable waste item
+
+You MUST reply with ONLY one word: VALID or INVALID. No explanation."""
 
 SYSTEM_PROMPT = """You are an expert AI waste management advisor. Based on the waste item shown in the image (with optional context from the user), provide actionable disposal guidance.
 
