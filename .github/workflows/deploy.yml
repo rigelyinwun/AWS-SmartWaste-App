@@ -91,7 +91,12 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text)
           aws s3 sync frontend/ s3://$BUCKET/ --cache-control no-cache
 
+      - name: Invalidate CloudFront Cache
+        run: |
+          aws cloudfront create-invalidation --distribution-id EQ9LGPGCO3MEH --paths "/*"
+
       - name: Print Website URL
         run: |
+          echo "CloudFront: https://d25ah8hrqybhsg.cloudfront.net"
           aws cloudformation describe-stacks --stack-name smartwaste \
             --query "Stacks[0].Outputs[?OutputKey=='WebsiteUrl'].OutputValue" --output text
