@@ -93,10 +93,10 @@ jobs:
 
       - name: Invalidate CloudFront Cache
         run: |
-          aws cloudfront create-invalidation --distribution-id EQ9LGPGCO3MEH --paths "/*" || echo "CloudFront invalidation skipped (no permission)"
+          aws cloudfront create-invalidation --distribution-id E2IBHD1PK4Z4GV --paths "/*" || echo "CloudFront invalidation skipped (no permission)"
 
       - name: Print Website URL
         run: |
-          echo "CloudFront: https://d25ah8hrqybhsg.cloudfront.net"
+          echo "CloudFront: https://d3f173je1qvblr.cloudfront.net"
           aws cloudformation describe-stacks --stack-name smartwaste \
             --query "Stacks[0].Outputs[?OutputKey=='WebsiteUrl'].OutputValue" --output text
