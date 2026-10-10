@@ -2,7 +2,7 @@ import json
 import logging
 import traceback
 import boto3
-from flask import Flask, request, Response, stream_with_context
+from flask import Flask, request, Response
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -30,21 +30,76 @@ Reply "INVALID" if ANY of these are true:
 
 You MUST reply with ONLY one word: VALID or INVALID. No explanation."""
 
-SYSTEM_PROMPT = """You are an expert AI waste analyst. Your job is to analyze the image provided. Using the optional context from the user description, output a professional waste analysis in the following format:
+SYSTEM_PROMPT = """You are an expert AI waste analyst. Analyze the image provided, using the optional user description as context.
 
-##Waste Identification
-Item Name: Precise identification of the object.
-Category: (e.g., Plastic, Organic, Metal, Paper, E-waste, Glass, Textile, Hazardous, or Mixed).
-Confidence Level: High, Medium, or Low (with a brief reason).
-Recyclability: State if it is Fully, Partially, or Not Recyclable.
+Respond with ONLY a single valid JSON object and nothing else — no markdown, no code fences, no commentary before or after. The JSON object must have EXACTLY these keys:
 
-##Technical Specs
-Estimated Weight: A realistic rough estimate (e.g., 50g, 1kg) based on the item type.
-Material Composition: Briefly explain what materials this item is likely made of.
+{
+  "category": "The waste category, e.g. Plastic, Organic, Metal, Paper, E-waste, Glass, Textile, Hazardous, or Mixed",
+  "confidence_level": "High, Medium, or Low — followed by a brief reason in parentheses",
+  "description": "A concise identification of the item (what it is)",
+  "estimated_weight": "A realistic rough estimate with units, e.g. 50g or 1kg",
+  "recyclability": "Fully Recyclable, Partially Recyclable, or Not Recyclable",
+  "material_composition": "A brief explanation of what materials the item is likely made of"
+}
 
-Please be highly specific. If the image is unclear, acknowledge the uncertainty."""
+Rules:
+- Every value must be a plain string.
+- Be specific. If the image is unclear, reflect that in the confidence_level and description.
+- Do not add, rename, or omit any keys.
+- Output must be parseable by json.loads with no surrounding text."""
 
 REJECTION_MESSAGE = "⚠️ The uploaded image or description is not suitable for waste analysis. Please upload a clear photo of a waste item (e.g., plastic bottle, food packaging, electronics) and avoid inappropriate content. Try again with a relevant image."
+
+# Fixed set of fields returned to the frontend, in display order.
+DETAIL_FIELDS = [
+    "category",
+    "confidence_level",
+    "description",
+    "estimated_weight",
+    "recyclability",
+    "material_composition",
+]
+
+
+def parse_details_json(raw_text):
+    """Extract a JSON object from the model output and normalize it to the
+    fixed DETAIL_FIELDS schema. Always returns a dict with every expected key."""
+    parsed = {}
+    text = raw_text.strip()
+
+    # Strip markdown code fences if the model wrapped the JSON.
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+
+    # Try direct parse first, then fall back to the first {...} block.
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed = json.loads(text[start:end + 1])
+            except Exception:
+                logger.warning("Could not parse details JSON from model output")
+                parsed = {}
+
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    # Normalize to the fixed schema; coerce every value to a trimmed string.
+    normalized = {}
+    for key in DETAIL_FIELDS:
+        value = parsed.get(key, "")
+        if value is None:
+            value = ""
+        normalized[key] = str(value).strip() or "N/A"
+
+    return normalized
 
 
 def validate_input(user_content):
@@ -119,25 +174,20 @@ def analyze(path):
 
         logger.info("Calling Bedrock model: %s", MODEL_ID)
 
-        def generate():
-            try:
-                response = bedrock.invoke_model_with_response_stream(
-                    modelId=MODEL_ID,
-                    contentType="application/json",
-                    accept="application/json",
-                    body=json.dumps(body),
-                )
-                for event in response["body"]:
-                    chunk = json.loads(event["chunk"]["bytes"])
-                    if chunk.get("type") == "content_block_delta":
-                        delta = chunk.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            yield delta["text"]
-            except Exception as e:
-                logger.error("Error in generate: %s", traceback.format_exc())
-                yield f"\n\nERROR: {str(e)}"
+        response = bedrock.invoke_model(
+            modelId=MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(body),
+        )
+        result = json.loads(response["body"].read())
+        raw_text = result.get("content", [{}])[0].get("text", "").strip()
 
-        return Response(stream_with_context(generate()), content_type="text/plain; charset=utf-8")
+        details = parse_details_json(raw_text)
+        return Response(
+            json.dumps(details),
+            content_type="application/json; charset=utf-8",
+        )
 
     except Exception as e:
         logger.error("Error in analyze: %s", traceback.format_exc())

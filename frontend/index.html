@@ -5,16 +5,42 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SmartWaste - AI Waste Analysis</title>
     <link rel="icon" type="image/png" href="images/logo.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap">
     <link rel="stylesheet" href="style.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+          crossorigin="">
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
+            crossorigin="" defer></script>
 </head>
 <body>
     <header>
-        <div class="header-content">
+        <div class="header-brand">
             <h1><img src="images/logo.png" alt="SmartWaste logo" class="header-logo">SmartWaste</h1>
             <p class="subtitle">AI-Powered Waste Analysis & Disposal Guide</p>
         </div>
+        <nav class="header-actions" aria-label="Account actions">
+            <button type="button" class="header-icon-btn" id="profileBtn" aria-label="Profile" title="Profile">
+                <i class="fa-solid fa-user"></i>
+            </button>
+            <button type="button" class="header-icon-btn" id="chatHeaderBtn" aria-label="Chat" title="Chat">
+                <i class="fa-solid fa-comment-dots"></i>
+            </button>
+            <button type="button" class="header-icon-btn" id="notificationsBtn" aria-label="Notifications" title="Notifications">
+                <i class="fa-solid fa-bell"></i>
+                <span class="icon-badge" aria-hidden="true"></span>
+            </button>
+            <button type="button" class="btn-auth btn-login" id="loginBtn">Login</button>
+            <button type="button" class="btn-auth btn-signup" id="signupBtn">Sign Up</button>
+        </nav>
     </header>
+
+    <!-- Fixed side legend -->
+    <aside class="side-legend" aria-label="Waste Collect Portal">
+        <span>Waste Collect Portal</span>
+    </aside>
 
     <main>
         <!-- Widget 1: Upload Waste Image -->
@@ -60,35 +86,58 @@
             <button class="btn-run" id="runAll">🔍 Analyze Waste</button>
         </div>
 
-        <!-- Widget 4 & 5: Waste Details and Further Actions -->
-        <div class="output-row" id="outputSection" hidden>
-            <section class="widget output-widget">
-                <div class="widget-header ai-header">
-                    <h2>✨ Waste Details</h2>
-                </div>
-                <div class="output-panel" id="wasteDetailsPanel">
-                    <div class="placeholder-text">Upload an image and click Analyze to see results</div>
-                </div>
-            </section>
+        <!-- Tabbed Output: Waste Details / Future Actions / Environmental Impacts -->
+        <div class="output-tabs-section" id="outputSection" hidden>
+            <div class="tab-bar" role="tablist" aria-label="Analysis results">
+                <button type="button" class="tab-btn active" id="tab-waste" role="tab" aria-selected="true" aria-controls="wasteDetailsPanel" data-tab="wasteDetailsPanel">
+                    Waste Details
+                </button>
+                <button type="button" class="tab-btn" id="tab-actions" role="tab" aria-selected="false" aria-controls="furtherActionsPanel" data-tab="furtherActionsPanel">
+                    Future Actions
+                </button>
+                <button type="button" class="tab-btn" id="tab-env" role="tab" aria-selected="false" aria-controls="environmentalImpactPanel" data-tab="environmentalImpactPanel">
+                    Environmental Impacts
+                </button>
+            </div>
 
-            <section class="widget output-widget">
-                <div class="widget-header ai-header">
-                    <h2>✨ Further Actions</h2>
+            <div class="tab-panels">
+                <div class="widget output-widget tab-panel active" role="tabpanel" aria-labelledby="tab-waste">
+                    <div class="output-panel" id="wasteDetailsPanel">
+                        <div class="placeholder-text">Upload an image and click Analyze to see results</div>
+                    </div>
                 </div>
-                <div class="output-panel" id="furtherActionsPanel">
-                    <div class="placeholder-text">Upload an image and click Analyze to see results</div>
-                </div>
-            </section>
 
-            <!-- Widget 6: Environmental Impact -->
-            <section class="widget output-widget full-width">
-                <div class="widget-header ai-header">
-                    <h2>✨ Environmental Impact</h2>
+                <div class="widget output-widget tab-panel" role="tabpanel" aria-labelledby="tab-actions" hidden>
+                    <div class="output-panel" id="furtherActionsPanel">
+                        <div class="placeholder-text">Upload an image and click Analyze to see results</div>
+                    </div>
+
+                    <!-- Nearby disposal / recycling facilities -->
+                    <div class="facilities-block" id="facilitiesBlock" hidden>
+                        <h3 class="facilities-heading">
+                            <i class="fa-solid fa-location-dot"></i>
+                            Nearby Disposal &amp; Recycling Centers
+                        </h3>
+                        <p class="facilities-subheading" id="facilitiesSubheading"></p>
+
+                        <div class="facilities-map-wrap">
+                            <div id="facilitiesMap" class="facilities-map"></div>
+                            <div class="facilities-map-loading" id="facilitiesMapLoading">
+                                <div class="spinner"></div>
+                                <div class="loading-text">Finding nearby facilities...</div>
+                            </div>
+                        </div>
+
+                        <ul class="facilities-list" id="facilitiesList"></ul>
+                    </div>
                 </div>
-                <div class="output-panel" id="environmentalImpactPanel">
-                    <div class="placeholder-text">Upload an image and click Analyze to see results</div>
+
+                <div class="widget output-widget tab-panel" role="tabpanel" aria-labelledby="tab-env" hidden>
+                    <div class="output-panel" id="environmentalImpactPanel">
+                        <div class="placeholder-text">Upload an image and click Analyze to see results</div>
+                    </div>
                 </div>
-            </section>
+            </div>
         </div>
 
         <!-- Widget 7: SmartWaste Assistant (Floating Chatbot) -->
@@ -135,6 +184,46 @@ What would you like to know about waste disposal?</div>
         <p>SmartWaste — Powered by Amazon Bedrock & Claude</p>
     </footer>
 
+    <!-- Auth Modal (Login / Sign Up) -->
+    <div class="auth-overlay" id="authOverlay">
+        <div class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+            <button type="button" class="auth-modal-close" id="authClose" aria-label="Close">&times;</button>
+            <div class="auth-brand">
+                <img src="images/logo.png" alt="SmartWaste logo" class="auth-logo">
+                <h3 id="authTitle">Welcome back</h3>
+                <p class="auth-subtitle" id="authSubtitle">Log in to your SmartWaste account</p>
+            </div>
+
+            <form class="auth-form" id="authForm" novalidate>
+                <div class="auth-field" id="nameField" hidden>
+                    <label for="authName">Full Name</label>
+                    <input type="text" id="authName" placeholder="Jane Doe" autocomplete="name">
+                </div>
+                <div class="auth-field">
+                    <label for="authEmail">Email</label>
+                    <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email" required>
+                </div>
+                <div class="auth-field">
+                    <label for="authPassword">Password</label>
+                    <input type="password" id="authPassword" placeholder="••••••••" autocomplete="current-password" required>
+                </div>
+                <div class="auth-field" id="confirmField" hidden>
+                    <label for="authConfirm">Confirm Password</label>
+                    <input type="password" id="authConfirm" placeholder="••••••••" autocomplete="new-password">
+                </div>
+
+                <p class="auth-error" id="authError" hidden></p>
+
+                <button type="submit" class="btn-auth-submit" id="authSubmit">Login</button>
+            </form>
+
+            <p class="auth-switch">
+                <span id="authSwitchText">Don't have an account?</span>
+                <button type="button" class="auth-switch-btn" id="authSwitchBtn">Sign Up</button>
+            </p>
+        </div>
+    </div>
+
     <!-- Invalid Input Popup -->
     <div class="invalid-overlay" id="invalidOverlay">
         <div class="invalid-modal">
@@ -152,6 +241,14 @@ What would you like to know about waste disposal?</div>
             further_actions: '__URL_FURTHER_ACTIONS__',
             environmental_impact: '__URL_ENVIRONMENTAL_IMPACT__',
             smartwaste_assistant: '__URL_SMARTWASTE_ASSISTANT__',
+            nearby_facilities: '__URL_NEARBY_FACILITIES__',
+        };
+
+        // Amazon Location map config (injected by CI/CD; key is a browser-scoped
+        // Maps GetTile key created in the console, stored as a GitHub secret)
+        var MAP_CONFIG = {
+            apiKey: '__MAP_API_KEY__',
+            region: '__AWS_REGION__',
         };
     </script>
     <script src="app.js"></script>

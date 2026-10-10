@@ -52,7 +52,7 @@ jobs:
           }
 
           # Configure CORS on each Function URL
-          for func in WasteDetailsFunction FurtherActionsFunction EnvironmentalImpactFunction SmartWasteAssistantFunction; do
+          for func in WasteDetailsFunction FurtherActionsFunction EnvironmentalImpactFunction SmartWasteAssistantFunction NearbyFacilitiesFunction; do
             FUNC_NAME=$(aws cloudformation describe-stack-resource --stack-name smartwaste \
               --logical-resource-id $func --query "StackResourceDetail.PhysicalResourceId" --output text)
             echo "Configuring CORS for $func ($FUNC_NAME)"
@@ -81,6 +81,24 @@ jobs:
           echo "SmartWasteAssistantUrl = $URL"
           if [ -z "$URL" ] || [ "$URL" = "None" ]; then echo "ERROR: SmartWasteAssistantUrl is empty"; exit 1; fi
           sed -i "s|__URL_SMARTWASTE_ASSISTANT__|$URL|g" frontend/index.html
+
+          URL=$(get_output NearbyFacilitiesUrl)
+          echo "NearbyFacilitiesUrl = $URL"
+          if [ -z "$URL" ] || [ "$URL" = "None" ]; then echo "ERROR: NearbyFacilitiesUrl is empty"; exit 1; fi
+          sed -i "s|__URL_NEARBY_FACILITIES__|$URL|g" frontend/index.html
+
+          # Browser map API key is created manually in the console and stored
+          # as a GitHub secret (MAP_API_KEY). Tiles only — Places uses the Lambda role.
+          MAP_KEY='${{ secrets.MAP_API_KEY }}'
+          echo "MapApiKey retrieved (length ${#MAP_KEY})"
+          if [ -z "$MAP_KEY" ]; then echo "ERROR: MAP_API_KEY secret is empty"; exit 1; fi
+          # Use a different sed delimiter since API keys may contain slashes
+          sed -i "s#__MAP_API_KEY__#$MAP_KEY#g" frontend/index.html
+
+          REGION_OUT=$(get_output AwsRegion)
+          echo "AwsRegion = $REGION_OUT"
+          if [ -z "$REGION_OUT" ] || [ "$REGION_OUT" = "None" ]; then echo "ERROR: AwsRegion is empty"; exit 1; fi
+          sed -i "s|__AWS_REGION__|$REGION_OUT|g" frontend/index.html
 
           echo "--- Verifying replacements ---"
           grep "STREAM_URLS" frontend/index.html

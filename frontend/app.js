@@ -77,61 +77,38 @@
         reader.readAsDataURL(file);
     }
 
-    // --- Rendering: Waste Details as Table ---
-    function renderWasteDetailsTable(text) {
-        var lines = text.split('\n');
-        var rows = [];
-        var currentLabel = '';
-        var currentValue = '';
+    // --- Rendering: Waste Details as Table (fixed JSON schema) ---
+    // Fields rendered, in display order, with human-readable labels.
+    var WASTE_DETAIL_FIELDS = [
+        { key: 'category', label: 'Category' },
+        { key: 'confidence_level', label: 'Confidence Level' },
+        { key: 'description', label: 'Description' },
+        { key: 'estimated_weight', label: 'Estimated Weight' },
+        { key: 'recyclability', label: 'Recyclability' },
+        { key: 'material_composition', label: 'Material Composition' }
+    ];
 
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i].trim();
-            if (!line) continue;
-
-            // Skip markdown headers but use them as context
-            if (line.startsWith('#')) continue;
-
-            // Bullet points - append to current value
-            if (line.startsWith('-') || line.startsWith('*') || line.startsWith('•')) {
-                var bulletText = line.replace(/^[\-\*•]\s*/, '').trim();
-                if (bulletText) {
-                    currentValue += (currentValue ? '<br>' : '') + '\u2022 ' + escapeHtml(bulletText);
-                }
-                continue;
-            }
-
-            // Check for "Label: Value" pattern (colon within first 40 chars)
-            var colonIndex = line.indexOf(':');
-            if (colonIndex > 0 && colonIndex < 40) {
-                // Save previous row
-                if (currentLabel) {
-                    rows.push({ label: currentLabel, value: currentValue.trim() });
-                }
-                currentLabel = line.substring(0, colonIndex).trim().replace(/^\*\*|\*\*$/g, '');
-                currentValue = escapeHtml(line.substring(colonIndex + 1).trim());
-            } else if (currentLabel) {
-                // Continuation of previous value
-                currentValue += (currentValue ? ' ' : '') + escapeHtml(line);
+    function renderWasteDetailsTable(data) {
+        // Accept either a parsed object or a raw JSON string.
+        var obj = data;
+        if (typeof data === 'string') {
+            try {
+                obj = JSON.parse(data);
+            } catch (e) {
+                obj = {};
             }
         }
-        // Push last row
-        if (currentLabel) {
-            rows.push({ label: currentLabel, value: currentValue.trim() });
-        }
-
-        if (rows.length === 0) {
-            // Fallback: just render as markdown
-            var fallback = '';
-            for (var f = 0; f < lines.length; f++) {
-                var html = renderMarkdownLine(lines[f]);
-                if (html) fallback += html;
-            }
-            return fallback || escapeHtml(text);
-        }
+        if (!obj || typeof obj !== 'object') obj = {};
 
         var html = '<table class="waste-table">';
-        for (var j = 0; j < rows.length; j++) {
-            html += '<tr><td>' + escapeHtml(rows[j].label) + '</td><td>' + rows[j].value + '</td></tr>';
+        for (var i = 0; i < WASTE_DETAIL_FIELDS.length; i++) {
+            var field = WASTE_DETAIL_FIELDS[i];
+            var value = obj[field.key];
+            if (value === undefined || value === null || String(value).trim() === '') {
+                value = 'N/A';
+            }
+            html += '<tr><td>' + escapeHtml(field.label) + '</td><td>' +
+                    escapeHtml(String(value)) + '</td></tr>';
         }
         html += '</table>';
         return html;
@@ -189,275 +166,173 @@
     }
 
     // --- Rendering: Environmental Impact (Rich Layout) ---
-    function renderEnvironmentalImpact(text) {
-        var sections = parseEnvSections(text);
-        var html = '<div class="env-impact-layout">';
+    // Fixed flip-card config: key -> label, icon, color theme, and back-face image.
+    // Only three images exist; each is reused for the most thematically related cards.
+    // Each card has a themed background image shown on its flip-back.
+    var ENV_CARDS = [
+        { key: 'land_impact',          title: 'Land Impact',     icon: 'fa-mountain-sun',   theme: 'orange', img: 'images/landfill.jpg' },
+        { key: 'water_impact',         title: 'Water Impact',    icon: 'fa-droplet',        theme: 'teal',   img: 'images/water.jpeg' },
+        { key: 'wildlife_impact',      title: 'Wildlife Impact', icon: 'fa-paw',            theme: 'purple', img: 'images/wildlife.jpg' },
+        { key: 'climate_impact',       title: 'Climate Impact',  icon: 'fa-earth-asia',     theme: 'teal',   img: 'images/climate.jpg' },
+        { key: 'health_impact',        title: 'Health Impact',   icon: 'fa-heart-pulse',    theme: 'purple', img: 'images/health.jpg' },
+        { key: 'recycle_value',        title: 'Circular Value',  icon: 'fa-recycle',        theme: 'orange', img: 'images/recycle.png' },
+        { key: 'future_impact',        title: 'Future Impact',   icon: 'fa-hourglass-half', theme: 'purple', img: 'images/future.jpg' },
+        { key: 'best_practices',       title: 'Best Practices',  icon: 'fa-lightbulb',      theme: 'orange', img: 'images/best.png' },
+        { key: 'educational_insights', title: 'Edu Insights',    icon: 'fa-book-open',      theme: 'teal',   img: 'images/education.jpg' }
+    ];
 
-        // Try to extract key data
-        var identification = findEnvSection(sections, 'identification');
-        var decomposition = extractDecomposition(text);
-
-        // Row 1: Identification + Decomposition Time
-        html += '<div class="env-row env-row-top">';
-        html += '<div class="env-card">';
-        html += '<div class="env-card-title">Waste Item Identification</div>';
-        if (identification) {
-            html += '<ul class="env-list">';
-            for (var i = 0; i < identification.bullets.length; i++) {
-                html += '<li>' + escapeHtml(identification.bullets[i]) + '</li>';
-            }
-            html += '</ul>';
-        }
-        html += '</div>';
-        if (decomposition) {
-            var decompUnit = extractDecompositionUnit(text);
-            html += '<div class="env-card env-decomp-card">';
-            html += '<div class="env-card-title">Estimated Decomposition Time</div>';
-            html += '<div class="env-decomp-number">' + escapeHtml(decomposition) + '</div>';
-            html += '<div class="env-decomp-label">' + escapeHtml(decompUnit) + '</div>';
-            html += '</div>';
-        }
-        html += '</div>';
-
-        // Row 2: Impact images (land/water/wildlife) if they have actual content
-        var landImpact = findEnvSection(sections, 'land');
-        var waterImpact = findEnvSection(sections, 'water');
-        var wildlifeImpact = findEnvSection(sections, 'wildlife');
-
-        // Only show cards that have actual bullet content
-        var impactCards = [];
-        if (landImpact && landImpact.bullets.length > 0) impactCards.push({ data: landImpact, img: 'images/landfill.jpg', alt: 'Land impact', title: 'Land Impact' });
-        if (waterImpact && waterImpact.bullets.length > 0) impactCards.push({ data: waterImpact, img: 'images/water.jpeg', alt: 'Water impact', title: 'Water Impact' });
-        if (wildlifeImpact && wildlifeImpact.bullets.length > 0) impactCards.push({ data: wildlifeImpact, img: 'images/wildlife.jpg', alt: 'Wildlife impact', title: 'Wildlife Impact' });
-
-        if (impactCards.length > 0) {
-            html += '<div class="env-section-block">';
-            html += '<div class="env-section-heading">Environmental Impact</div>';
-            html += '<div class="env-impact-grid">';
-
-            for (var ic = 0; ic < impactCards.length; ic++) {
-                var card = impactCards[ic];
-                html += '<div class="env-impact-card">';
-                html += '<img src="' + card.img + '" alt="' + card.alt + '" class="env-impact-img">';
-                html += '<div class="env-impact-card-title">' + card.title + '</div>';
-                html += '<ul class="env-list-sm">';
-                for (var cb = 0; cb < card.data.bullets.length; cb++) {
-                    html += '<li>' + escapeHtml(card.data.bullets[cb]) + '</li>';
-                }
-                html += '</ul>';
-                html += '</div>';
-            }
-
-            html += '</div>';
-            html += '</div>';
-        }
-
-        // Remaining sections: simple text cards with nested sub-headings
-        var handledTitles = [];
-        if (identification) handledTitles.push(identification.title);
-        if (landImpact) handledTitles.push(landImpact.title);
-        if (waterImpact) handledTitles.push(waterImpact.title);
-        if (wildlifeImpact) handledTitles.push(wildlifeImpact.title);
-
-        for (var si = 0; si < sections.length; si++) {
-            if (handledTitles.indexOf(sections[si].title) !== -1) continue;
-            if (sections[si].bullets.length === 0) continue;
-            html += '<div class="env-section-block">';
-            html += '<div class="env-section-heading">' + escapeHtml(sections[si].title) + '</div>';
-            html += renderNestedBullets(sections[si].bullets);
-            html += '</div>';
-        }
-
-        html += '</div>';
-        return html;
+    function envSectionData(obj, key) {
+        var s = obj[key];
+        if (!s || typeof s !== 'object') s = {};
+        var details = Array.isArray(s.details) ? s.details : [];
+        return { summary: s.summary || '', details: details };
     }
 
-    // Render bullets with nested sub-headings (items ending with :* or numbered items become bold parents)
-    function renderNestedBullets(bullets) {
-        var html = '';
-        var i = 0;
-
-        // First check if there's a markdown table in the bullets
-        var tableStart = -1;
-        for (var t = 0; t < bullets.length; t++) {
-            if (bullets[t].indexOf('|') !== -1 && bullets[t].trim().startsWith('|')) {
-                tableStart = t;
-                break;
-            }
+    // Build the Environmental Impacts tab from the fixed JSON schema.
+    function renderEnvironmentalImpact(data) {
+        var obj = data;
+        if (typeof data === 'string') {
+            try { obj = JSON.parse(data); } catch (e) { obj = {}; }
         }
+        if (!obj || typeof obj !== 'object') obj = {};
 
-        // Render any bullets before the table
-        var preBullets = tableStart === -1 ? bullets : bullets.slice(0, tableStart);
-        var postBullets = tableStart === -1 ? [] : bullets.slice(tableStart);
+        var wi = (obj.waste_identification && typeof obj.waste_identification === 'object')
+            ? obj.waste_identification : {};
+        var decomposition = obj.estimated_decomposition_time || 'N/A';
+        var landfillPct = (typeof obj.landfill_percentage === 'number') ? obj.landfill_percentage : null;
+        var landfillNote = obj.landfill_percentage_note || '';
 
-        if (preBullets.length > 0) {
-            html += renderNestedList(preBullets);
-        }
+        var html = '<div class="env-layout">';
 
-        // Render markdown table if found
-        if (postBullets.length > 0) {
-            var tableRows = [];
-            var afterTable = [];
-            var inTable = true;
-            for (var tb = 0; tb < postBullets.length; tb++) {
-                var row = postBullets[tb].trim();
-                if (inTable && row.indexOf('|') !== -1 && row.startsWith('|')) {
-                    // Skip separator rows like |---|---|
-                    if (/^\|[\s\-:|]+\|$/.test(row)) continue;
-                    tableRows.push(row);
-                } else {
-                    inTable = false;
-                    afterTable.push(postBullets[tb]);
-                }
-            }
+        // --- Top row: identification + decomposition + landfill gauge ---
+        html += '<div class="env-top">';
 
-            if (tableRows.length > 0) {
-                html += '<table class="env-table">';
-                for (var tr = 0; tr < tableRows.length; tr++) {
-                    var cells = tableRows[tr].split('|').filter(function(c) { return c.trim() !== ''; });
-                    var tag = tr === 0 ? 'th' : 'td';
-                    html += '<tr>';
-                    for (var tc = 0; tc < cells.length; tc++) {
-                        html += '<' + tag + '>' + escapeHtml(cells[tc].trim()) + '</' + tag + '>';
-                    }
-                    html += '</tr>';
-                }
-                html += '</table>';
-            }
-
-            if (afterTable.length > 0) {
-                html += renderNestedList(afterTable);
-            }
-        }
-
-        return html;
-    }
-
-    // Render a list with parent/child nesting
-    function renderNestedList(bullets) {
-        var html = '<ul class="env-list">';
-        var i = 0;
-        while (i < bullets.length) {
-            var bullet = bullets[i];
-
-            // Check if this bullet ends with :* (sub-heading)
-            var isColonParent = /:\s*\*?\s*$/.test(bullet);
-
-            // Check if this is an ALL-CAPS or mostly-caps short label (was a numbered parent)
-            // e.g. "REUSE", "REFUSE/REDUCE (Primary Strategy)", "AVOID (Do Not Do)"
-            var isCapsParent = /^[A-Z][A-Z\s\/\-]{2,}/.test(bullet) && bullet.length < 60;
-
-            if (isColonParent || isCapsParent) {
-                var label = bullet;
-                if (isColonParent) {
-                    label = bullet.replace(/:\s*\*?\s*$/, '');
-                }
-                html += '<li><strong>' + escapeHtml(label) + '</strong>';
-
-                // Collect child bullets until next parent
-                var children = [];
-                i++;
-                while (i < bullets.length) {
-                    var next = bullets[i];
-                    if (/:\s*\*?\s*$/.test(next)) break;
-                    if (/^[A-Z][A-Z\s\/\-]{2,}/.test(next) && next.length < 60) break;
-                    children.push(next);
-                    i++;
-                }
-                if (children.length > 0) {
-                    html += '<ul class="env-list-nested">';
-                    for (var c = 0; c < children.length; c++) {
-                        html += '<li>' + escapeHtml(children[c]) + '</li>';
-                    }
-                    html += '</ul>';
-                }
-                html += '</li>';
-            } else {
-                html += '<li>' + escapeHtml(bullet) + '</li>';
-                i++;
-            }
-        }
+        // Identification card
+        html += '<div class="env-id-card">';
+        html += '<div class="env-id-title">Waste Item Identification</div>';
+        html += '<ul class="env-id-list">';
+        html += '<li><span>Item Type</span><strong>' + escapeHtml(wi.item_type || 'N/A') + '</strong></li>';
+        html += '<li><span>Material</span><strong>' + escapeHtml(wi.material || 'N/A') + '</strong></li>';
+        html += '<li><span>Hazard Level</span><strong>' + escapeHtml(wi.hazard_level || 'N/A') + '</strong></li>';
         html += '</ul>';
+        html += '</div>';
+
+        // Right column: decomposition + gauge stacked
+        html += '<div class="env-top-right">';
+        html += '<div class="env-decomp-card">';
+        html += '<div class="env-decomp-title">Estimated Decomposition Time</div>';
+        html += '<div class="env-decomp-value">' + escapeHtml(decomposition) + '</div>';
+        html += '</div>';
+
+        html += '<div class="env-gauge-card">';
+        html += '<div class="env-gauge-label">Percentage of same type of waste on landfill</div>';
+        if (landfillPct !== null) {
+            html += '<div class="env-gauge" style="--pct:' + landfillPct + '">';
+            html += '<div class="env-gauge-center">' + landfillPct + '%</div>';
+            html += '</div>';
+        } else {
+            html += '<div class="env-gauge-na">N/A</div>';
+        }
+        if (landfillNote) {
+            html += '<div class="env-gauge-note">' + escapeHtml(landfillNote) + '</div>';
+        }
+        html += '</div>';
+        html += '</div>';  // env-top-right
+
+        html += '</div>';  // env-top
+
+        // --- Flip cards grid ---
+        html += '<div class="env-cards-heading">Environmental Impact ' +
+                '<span class="env-cards-hint">(click a card to flip)</span></div>';
+        html += '<div class="env-cards-grid">';
+        for (var i = 0; i < ENV_CARDS.length; i++) {
+            var cfg = ENV_CARDS[i];
+            var sec = envSectionData(obj, cfg.key);
+
+            var backHtml = '';
+            if (sec.summary) {
+                backHtml += '<div class="env-card-summary">' + escapeHtml(sec.summary) + '</div>';
+            }
+            if (sec.details.length) {
+                backHtml += '<ul class="env-card-details">';
+                for (var d = 0; d < sec.details.length; d++) {
+                    backHtml += '<li>' + escapeHtml(sec.details[d]) + '</li>';
+                }
+                backHtml += '</ul>';
+            }
+            if (!backHtml) backHtml = '<div class="env-card-summary">No data available.</div>';
+
+            html += '<div class="env-flip-card theme-' + cfg.theme + '" tabindex="0" role="button" ' +
+                    'aria-label="' + escapeHtml(cfg.title) + ' — click to flip">';
+            html += '<div class="env-flip-inner">';
+            // Front
+            html += '<div class="env-flip-front">';
+            html += '<div class="env-card-icon"><i class="fa-solid ' + cfg.icon + '"></i></div>';
+            html += '<div class="env-card-title">' + escapeHtml(cfg.title) + '</div>';
+            html += '</div>';
+            // Back
+            html += '<div class="env-flip-back">';
+            html += '<div class="env-flip-back-header" style="background-image:url(\'' + cfg.img + '\')">';
+            html += '<span class="env-flip-back-title">' + escapeHtml(cfg.title) + '</span>';
+            html += '</div>';
+            html += '<div class="env-flip-back-body">';
+            html += backHtml;
+            html += '</div>';
+            html += '</div>';
+            html += '</div></div>';
+        }
+        html += '</div>';  // env-cards-grid
+
+        html += '</div>';  // env-layout
         return html;
     }
 
-    // Parse env impact text into sections, handling nested sub-headings like "Land Degradation:*"
-    function parseEnvSections(text) {
-        var lines = text.split('\n');
-        var sections = [];
-        var currentSection = null;
-        // Keywords that indicate a top-level environmental sub-section to split on
-        var splitKeywords = ['land', 'water', 'wildlife'];
+    // Fetch the environmental impact JSON and render the cards. Returns a promise.
+    function loadEnvironmentalImpact(payload) {
+        var panel = document.getElementById('environmentalImpactPanel');
+        panel.innerHTML = '<div class="loading-spinner"><div class="spinner"></div>' +
+            '<div class="loading-text">Assessing environmental impact...</div></div>';
 
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i].trim();
-            if (!line) continue;
-            if (/^-{2,}$/.test(line)) continue;
-
-            // Markdown headers always start new sections
-            if (line.startsWith('#')) {
-                if (currentSection) sections.push(currentSection);
-                currentSection = {
-                    title: cleanMarkdown(line.replace(/^#+\s*/, '')),
-                    bullets: []
-                };
-                continue;
+        return fetch(STREAM_URLS.environmental_impact, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        }).then(function(response) {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.text();
+        }).then(function(text) {
+            if (isRejectedResponse(text)) {
+                // Validation handled by waste_details; just clear here.
+                panel.innerHTML = '<div class="placeholder-text">Not available for this item.</div>';
+                return;
             }
-
-            // Check if it's a bullet
-            var isBullet = /^[\-\*•]/.test(line);
-            var bulletText = isBullet ? line.replace(/^[\-\*•]\s*/, '').trim() : line;
-
-            // Check if this bullet is a top-level split keyword (like "Land Degradation:*")
-            if (isBullet && /^[A-Z]/.test(bulletText) && /:\s*\*?\s*$/.test(bulletText)) {
-                var label = bulletText.replace(/:\s*\*?\s*$/, '').toLowerCase();
-                var shouldSplit = false;
-                for (var k = 0; k < splitKeywords.length; k++) {
-                    if (label.indexOf(splitKeywords[k]) !== -1) {
-                        shouldSplit = true;
-                        break;
-                    }
-                }
-                if (shouldSplit) {
-                    if (currentSection) sections.push(currentSection);
-                    currentSection = {
-                        title: cleanMarkdown(bulletText.replace(/:\s*\*?\s*$/, '')),
-                        bullets: []
-                    };
-                    continue;
-                }
+            var parsed;
+            try { parsed = JSON.parse(text); }
+            catch (e) {
+                panel.innerHTML = '<div class="error-message">\u26a0\ufe0f Could not read impact result.</div>';
+                return;
             }
-
-            // Regular content — add to current section
-            if (!currentSection) {
-                currentSection = { title: 'Details', bullets: [] };
-            }
-
-            if (isBullet) {
-                var cleaned = cleanMarkdown(bulletText);
-                // Strip leading numbering like "1. " or "2. "
-                cleaned = cleaned.replace(/^\d+\.\s+/, '');
-                if (cleaned && cleaned !== '--' && cleaned !== '-') {
-                    currentSection.bullets.push(cleaned);
-                }
-            } else {
-                var cleanedLine = cleanMarkdown(line);
-                // Strip leading numbering
-                cleanedLine = cleanedLine.replace(/^\d+\.\s+/, '');
-                if (cleanedLine) currentSection.bullets.push(cleanedLine);
-            }
-        }
-        if (currentSection) sections.push(currentSection);
-        return sections;
+            panel.innerHTML = renderEnvironmentalImpact(parsed);
+            bindEnvFlipCards(panel);
+        }).catch(function(err) {
+            panel.innerHTML = '<div class="error-message">\u26a0\ufe0f Error: ' + escapeHtml(err.message) + '</div>';
+        });
     }
 
-    function findEnvSection(sections, keyword) {
-        for (var i = 0; i < sections.length; i++) {
-            if (sections[i].title.toLowerCase().indexOf(keyword) !== -1) {
-                return sections[i];
-            }
+    // Wire click/keyboard flipping on the env cards within a container.
+    function bindEnvFlipCards(container) {
+        var cards = container.querySelectorAll('.env-flip-card');
+        for (var i = 0; i < cards.length; i++) {
+            cards[i].addEventListener('click', function() {
+                this.classList.toggle('flipped');
+            });
+            cards[i].addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    this.classList.toggle('flipped');
+                }
+            });
         }
-        return null;
     }
 
     function findSection(sections, keyword) {
@@ -477,43 +352,6 @@
         // Remove standalone -- or ---
         text = text.replace(/^-{2,}$/g, '').trim();
         return text;
-    }
-
-    function extractDecomposition(text) {
-        // Try various patterns the AI might use
-        var patterns = [
-            // "450-1,000 years" or "450 to 1000 years"
-            /(\d[\d,.\-–\s]*(?:to\s*)?\d*[\d,.]*)[\s]*(?:years|months|decades|centuries|millennium|millennia)/i,
-            // "Decomposition time: 450 years"
-            /decomposition[^:]*:\s*([^\n]+)/i,
-            // "Estimated decomposition: ..."
-            /estimated[^:]*decomposition[^:]*:\s*([^\n]+)/i,
-            // "breaks? down in X years"
-            /breaks?\s*down\s*in\s*([^\n.]+)/i,
-            // "takes X years to decompose"
-            /takes?\s*([^\n.]*?\d[^\n.]*?)\s*to\s*decompos/i,
-            // "X years to break down"
-            /(\d[\d,.\-–\s]*(?:to\s*)?\d*[\d,.]*\s*(?:years|months|decades|centuries))\s*to\s*(?:break|decompos)/i,
-            // Any line with a number followed by years
-            /(\d[\d,.\-–\s]*(?:to\s*)?\d*[\d,.]*)\s*(?:years|months)/i
-        ];
-
-        for (var i = 0; i < patterns.length; i++) {
-            var match = text.match(patterns[i]);
-            if (match) {
-                var val = match[1].trim();
-                // Clean up: remove trailing words that aren't part of the number
-                val = val.replace(/\s*(years|months|decades|centuries).*$/i, '').trim();
-                if (val) return val;
-            }
-        }
-        return null;
-    }
-
-    function extractDecompositionUnit(text) {
-        var match = text.match(/\d[\d,.\-–\s]*(?:to\s*)?\d*[\d,.]*\s*(years|months|decades|centuries|millennium|millennia)/i);
-        if (match) return match[1].toLowerCase();
-        return 'years';
     }
 
     // --- Parse sections from markdown ---
@@ -659,6 +497,14 @@
         runAllBtn.disabled = true;
         runAllBtn.textContent = '\u23f3 Analyzing...';
 
+        // Reveal the output section on the Waste Details tab and show a spinner
+        // right away so there's visible feedback while the request is in flight.
+        document.getElementById('outputSection').hidden = false;
+        activateTab('wasteDetailsPanel');
+        document.getElementById('wasteDetailsPanel').innerHTML =
+            '<div class="loading-spinner"><div class="spinner"></div>' +
+            '<div class="loading-text">Analyzing waste details...</div></div>';
+
         var baseBody = {
             file_data: fileData,
             file_mime: fileMime,
@@ -677,9 +523,25 @@
             }
             return response.text();
         }).then(function(wasteDetailsText) {
-            // Check for rejection
+            // Check for rejection (reject message is plain text, not JSON)
             if (isRejectedResponse(wasteDetailsText)) {
                 showInvalidPopup();
+                document.getElementById('wasteDetailsPanel').innerHTML =
+                    '<div class="placeholder-text">Upload an image and click Analyze to see results</div>';
+                document.getElementById('outputSection').hidden = true;
+                runAllBtn.disabled = false;
+                runAllBtn.textContent = '\ud83d\udd0d Analyze Waste';
+                return;
+            }
+
+            // Parse the fixed JSON schema returned by the lambda.
+            var wasteDetailsData;
+            try {
+                wasteDetailsData = JSON.parse(wasteDetailsText);
+            } catch (e) {
+                document.getElementById('outputSection').hidden = false;
+                document.getElementById('wasteDetailsPanel').innerHTML =
+                    '<div class="error-message">\u26a0\ufe0f Could not read analysis result.</div>';
                 runAllBtn.disabled = false;
                 runAllBtn.textContent = '\ud83d\udd0d Analyze Waste';
                 return;
@@ -688,9 +550,17 @@
             // Valid — show output section and render waste details
             document.getElementById('outputSection').hidden = false;
             var wastePanel = document.getElementById('wasteDetailsPanel');
-            wastePanel.innerHTML = renderWasteDetailsTable(wasteDetailsText);
+            wastePanel.innerHTML = renderWasteDetailsTable(wasteDetailsData);
 
-            // Now run further_actions and environmental_impact
+            // Kick off the nearby-facilities lookup (renders its own map + list).
+            loadNearbyFacilities({
+                file_data: fileData,
+                file_mime: fileMime,
+                description: descriptionInput.value.trim(),
+                location: locationInput.value.trim(),
+            });
+
+            // Now run further_actions (streamed) and environmental_impact (JSON)
             var promises = [
                 streamToPanel(STREAM_URLS.further_actions, {
                     file_data: fileData,
@@ -698,7 +568,7 @@
                     description: descriptionInput.value.trim(),
                     location: locationInput.value.trim(),
                 }, 'furtherActionsPanel', renderFurtherActions),
-                streamToPanel(STREAM_URLS.environmental_impact, baseBody, 'environmentalImpactPanel', renderEnvironmentalImpact),
+                loadEnvironmentalImpact(baseBody),
             ];
 
             Promise.all(promises.map(function(p) { return p.catch(function() {}); })).then(function() {
@@ -713,16 +583,185 @@
         });
     });
 
+    // --- Tab switching ---
+    var tabButtons = document.querySelectorAll('.tab-btn');
+
+    function activateTab(targetId) {
+        // Toggle button active state
+        for (var i = 0; i < tabButtons.length; i++) {
+            var isActive = tabButtons[i].getAttribute('data-tab') === targetId;
+            tabButtons[i].classList.toggle('active', isActive);
+            tabButtons[i].setAttribute('aria-selected', isActive ? 'true' : 'false');
+        }
+
+        // Toggle panel visibility
+        var panels = document.querySelectorAll('.tab-panel');
+        for (var p = 0; p < panels.length; p++) {
+            var panelContent = panels[p].querySelector('.output-panel');
+            var matches = panelContent && panelContent.id === targetId;
+            panels[p].hidden = !matches;
+            panels[p].classList.toggle('active', matches);
+        }
+
+        // MapLibre renders at zero size inside a hidden tab; recalc when the
+        // Future Actions tab (which hosts the map) becomes visible.
+        if (targetId === 'furtherActionsPanel' && facilitiesMap) {
+            setTimeout(function() { facilitiesMap.resize(); }, 50);
+        }
+    }
+
+    for (var tb = 0; tb < tabButtons.length; tb++) {
+        tabButtons[tb].addEventListener('click', function() {
+            activateTab(this.getAttribute('data-tab'));
+        });
+    }
+
     // --- Chat Toggle ---
     var chatFab = document.getElementById('chatFab');
     var chatPopup = document.getElementById('chatPopup');
     var chatPopupClose = document.getElementById('chatPopupClose');
     var chatBubbleHint = document.getElementById('chatBubbleHint');
     var closeBubbleHint = document.getElementById('closeBubbleHint');
+    var chatHeaderBtn = document.getElementById('chatHeaderBtn');
 
     chatFab.addEventListener('click', function() {
         chatPopup.classList.toggle('open');
         chatBubbleHint.classList.add('hidden');
+    });
+
+    if (chatHeaderBtn) {
+        chatHeaderBtn.addEventListener('click', function() {
+            chatPopup.classList.toggle('open');
+            chatBubbleHint.classList.add('hidden');
+        });
+    }
+
+    // --- Auth Modal (Login / Sign Up) ---
+    var authOverlay = document.getElementById('authOverlay');
+    var authClose = document.getElementById('authClose');
+    var loginBtn = document.getElementById('loginBtn');
+    var signupBtn = document.getElementById('signupBtn');
+    var authForm = document.getElementById('authForm');
+    var authTitle = document.getElementById('authTitle');
+    var authSubtitle = document.getElementById('authSubtitle');
+    var authSubmit = document.getElementById('authSubmit');
+    var authSwitchText = document.getElementById('authSwitchText');
+    var authSwitchBtn = document.getElementById('authSwitchBtn');
+    var nameField = document.getElementById('nameField');
+    var confirmField = document.getElementById('confirmField');
+    var authError = document.getElementById('authError');
+    var authEmail = document.getElementById('authEmail');
+    var authPassword = document.getElementById('authPassword');
+    var authName = document.getElementById('authName');
+    var authConfirm = document.getElementById('authConfirm');
+
+    var authMode = 'login'; // 'login' | 'signup'
+
+    function setAuthMode(mode) {
+        authMode = mode;
+        var isSignup = mode === 'signup';
+
+        authTitle.textContent = isSignup ? 'Create account' : 'Welcome back';
+        authSubtitle.textContent = isSignup
+            ? 'Sign up for a SmartWaste account'
+            : 'Log in to your SmartWaste account';
+        authSubmit.textContent = isSignup ? 'Sign Up' : 'Login';
+        authSwitchText.textContent = isSignup
+            ? 'Already have an account?'
+            : "Don't have an account?";
+        authSwitchBtn.textContent = isSignup ? 'Login' : 'Sign Up';
+
+        nameField.hidden = !isSignup;
+        confirmField.hidden = !isSignup;
+        authName.required = isSignup;
+        authConfirm.required = isSignup;
+        authPassword.setAttribute('autocomplete', isSignup ? 'new-password' : 'current-password');
+
+        hideAuthError();
+    }
+
+    function openAuth(mode) {
+        setAuthMode(mode);
+        authOverlay.classList.add('show');
+        setTimeout(function() { authEmail.focus(); }, 50);
+    }
+
+    function closeAuth() {
+        authOverlay.classList.remove('show');
+        authForm.reset();
+        hideAuthError();
+    }
+
+    function showAuthError(msg) {
+        authError.textContent = msg;
+        authError.hidden = false;
+    }
+
+    function hideAuthError() {
+        authError.hidden = true;
+        authError.textContent = '';
+    }
+
+    if (loginBtn) loginBtn.addEventListener('click', function() { openAuth('login'); });
+    if (signupBtn) signupBtn.addEventListener('click', function() { openAuth('signup'); });
+    if (authClose) authClose.addEventListener('click', closeAuth);
+
+    authOverlay.addEventListener('click', function(e) {
+        if (e.target === authOverlay) closeAuth();
+    });
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && authOverlay.classList.contains('show')) {
+            closeAuth();
+        }
+    });
+
+    authSwitchBtn.addEventListener('click', function() {
+        setAuthMode(authMode === 'login' ? 'signup' : 'login');
+    });
+
+    authForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        hideAuthError();
+
+        var email = authEmail.value.trim();
+        var password = authPassword.value;
+
+        if (!email || !password) {
+            showAuthError('Please enter your email and password.');
+            return;
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            showAuthError('Please enter a valid email address.');
+            return;
+        }
+        if (password.length < 6) {
+            showAuthError('Password must be at least 6 characters.');
+            return;
+        }
+
+        if (authMode === 'signup') {
+            if (!authName.value.trim()) {
+                showAuthError('Please enter your full name.');
+                return;
+            }
+            if (password !== authConfirm.value) {
+                showAuthError('Passwords do not match.');
+                return;
+            }
+        }
+
+        // No auth backend yet — acknowledge and close.
+        authSubmit.disabled = true;
+        authSubmit.textContent = authMode === 'signup' ? 'Signing up...' : 'Logging in...';
+        setTimeout(function() {
+            authSubmit.disabled = false;
+            setAuthMode(authMode);
+            closeAuth();
+            alert(authMode === 'signup'
+                ? 'Account created! (demo — no backend connected yet)'
+                : 'Logged in! (demo — no backend connected yet)');
+        }, 600);
     });
 
     chatPopupClose.addEventListener('click', function() {
@@ -835,7 +874,324 @@
     }
 
     function escapeHtml(text) {
-        return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // === Nearby Facilities: map + list ===
+    var facilitiesMap = null;        // MapLibre GL map instance
+    var facilityMarkers = [];        // MapLibre markers, index-aligned with list items
+    var facilityItemEls = [];        // list <li> elements, index-aligned with markers
+
+    function loadNearbyFacilities(payload) {
+        var block = document.getElementById('facilitiesBlock');
+        var listEl = document.getElementById('facilitiesList');
+        var subheading = document.getElementById('facilitiesSubheading');
+        var mapLoading = document.getElementById('facilitiesMapLoading');
+
+        if (!block) return;
+
+        // Reset state and show the block with a loading map.
+        block.hidden = false;
+        if (mapLoading) mapLoading.hidden = false;
+        listEl.innerHTML = '';
+        subheading.textContent = 'Searching for nearby facilities...';
+
+        if (!STREAM_URLS.nearby_facilities || STREAM_URLS.nearby_facilities.indexOf('__URL_') === 0) {
+            // URL not injected (e.g. local preview) — hide gracefully.
+            block.hidden = true;
+            return;
+        }
+
+        fetch(STREAM_URLS.nearby_facilities, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        }).then(function(response) {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.json();
+        }).then(function(data) {
+            if (mapLoading) mapLoading.hidden = true;
+            renderFacilities(data);
+        }).catch(function(err) {
+            if (mapLoading) mapLoading.hidden = true;
+            subheading.textContent = '';
+            listEl.innerHTML = '<div class="error-message">\u26a0\ufe0f Could not load nearby facilities: ' +
+                escapeHtml(err.message) + '</div>';
+        });
+    }
+
+    function renderFacilities(data) {
+        var listEl = document.getElementById('facilitiesList');
+        var subheading = document.getElementById('facilitiesSubheading');
+
+        var center = (data && data.center) || { lat: 3.139, lng: 101.6869, label: 'Malaysia' };
+        var facilities = (data && Array.isArray(data.facilities)) ? data.facilities : [];
+        var locationProvided = !!(data && data.location_provided);
+
+        if (locationProvided) {
+            subheading.className = 'facilities-subheading hint-located';
+            subheading.innerHTML = '<i class="fa-solid fa-location-crosshairs"></i> ' +
+                'Showing nearby stations based on your location' +
+                (center.label ? ' (' + escapeHtml(center.label) + ')' : '') + '.';
+        } else {
+            subheading.className = 'facilities-subheading hint-default';
+            subheading.innerHTML = '<i class="fa-solid fa-circle-info"></i> ' +
+                'No location provided, so these are common recycling stations in Malaysia. ' +
+                'Enter your location above and re-analyze to see stations near you.';
+        }
+
+        // --- Map ---
+        initFacilitiesMap(center, facilities);
+
+        // --- List ---
+        listEl.innerHTML = '';
+        facilityItemEls = [];
+
+        if (facilities.length === 0) {
+            listEl.innerHTML = '<div class="placeholder-text">No facilities found.</div>';
+            return;
+        }
+
+        for (var i = 0; i < facilities.length; i++) {
+            (function(index) {
+                var f = facilities[index];
+                var li = document.createElement('li');
+                li.className = 'facility-item';
+                li.setAttribute('data-index', index);
+
+                // Icon
+                var icon = document.createElement('div');
+                icon.className = 'facility-icon';
+                icon.innerHTML = '<i class="fa-solid fa-recycle"></i>';
+                li.appendChild(icon);
+
+                // Body (name, meta, type tags)
+                var body = document.createElement('div');
+                body.className = 'facility-body';
+
+                var types = Array.isArray(f.waste_types) ? f.waste_types : [];
+                var distanceText = f.distance && String(f.distance).trim()
+                    ? String(f.distance).trim()
+                    : 'Unavailable';
+
+                var metaParts = '<span class="facility-distance">' + escapeHtml(distanceText) + '</span>';
+                if (f.address) {
+                    metaParts += '<span class="dot">\u2022</span><span>' + escapeHtml(f.address) + '</span>';
+                }
+
+                var tagsHtml = '';
+                if (types.length) {
+                    tagsHtml = '<div class="facility-types">';
+                    for (var t = 0; t < types.length; t++) {
+                        tagsHtml += '<span class="facility-type-tag">' + escapeHtml(types[t]) + '</span>';
+                    }
+                    tagsHtml += '</div>';
+                }
+
+                var email = f.email && String(f.email).trim() ? String(f.email).trim() : '';
+                var phone = f.phone && String(f.phone).trim() ? String(f.phone).trim() : '';
+                var isGeneralLine = !!f.general_line;
+
+                // Surface the raw contact text in the card body so the info is
+                // always visible/copyable, and note general enquiry lines.
+                var contactTextHtml = '';
+                if (email || phone) {
+                    contactTextHtml = '<div class="facility-contact-text">';
+                    if (phone) {
+                        contactTextHtml += '<span><i class="fa-solid fa-phone"></i> ' + escapeHtml(phone) +
+                            (isGeneralLine ? ' <em class="contact-note">(general enquiry line)</em>' : '') + '</span>';
+                    }
+                    if (email) {
+                        contactTextHtml += '<span><i class="fa-solid fa-envelope"></i> ' + escapeHtml(email) + '</span>';
+                    }
+                    contactTextHtml += '</div>';
+                }
+
+                body.innerHTML =
+                    '<div class="facility-name">' + escapeHtml(f.name || 'Unknown facility') + '</div>' +
+                    '<div class="facility-meta">' + metaParts + '</div>' +
+                    tagsHtml +
+                    contactTextHtml;
+                li.appendChild(body);
+
+                // Contacts (email / phone) action buttons — clickable on any device.
+                var contacts = document.createElement('div');
+                contacts.className = 'facility-contacts';
+
+                var emailBtn = buildContactButton('email', email);
+                var phoneBtn = buildContactButton('phone', phone);
+                contacts.appendChild(emailBtn);
+                contacts.appendChild(phoneBtn);
+                li.appendChild(contacts);
+
+                // Click the item (but not a contact button) focuses it on the map.
+                li.addEventListener('click', function(e) {
+                    if (e.target.closest('.contact-btn')) return;
+                    focusFacility(index);
+                });
+
+                listEl.appendChild(li);
+                facilityItemEls.push(li);
+            })(i);
+        }
+    }
+
+    // Build an email or phone button. Clickable on any device when a value
+    // exists (mailto: opens a compose window; tel: starts a call on phones).
+    // When no value exists, renders disabled and labeled "not listed".
+    function buildContactButton(kind, value) {
+        var hasValue = !!(value && String(value).trim());
+        var iconClass = kind === 'email' ? 'fa-envelope' : 'fa-phone';
+        var label = kind === 'email' ? 'Email' : 'Call';
+
+        if (hasValue) {
+            var a = document.createElement('a');
+            a.className = 'contact-btn';
+            a.href = (kind === 'email' ? 'mailto:' : 'tel:') + String(value).trim();
+            a.title = label + ': ' + String(value).trim();
+            a.setAttribute('aria-label', label + ' ' + String(value).trim());
+            a.innerHTML = '<i class="fa-solid ' + iconClass + '"></i>';
+            // Don't trigger the list-item map focus when using a contact button.
+            a.addEventListener('click', function(e) { e.stopPropagation(); });
+            return a;
+        }
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'contact-btn disabled';
+        btn.disabled = true;
+        btn.setAttribute('aria-label', label + ' not listed');
+        btn.title = label + ' not listed';
+        btn.innerHTML = '<i class="fa-solid ' + iconClass + '"></i>';
+        return btn;
+    }
+
+    function amazonLocationStyleUrl() {
+        // Amazon Location Maps v2 standalone style descriptor (managed "Standard"
+        // style), authenticated with the browser API key.
+        return 'https://maps.geo.' + MAP_CONFIG.region +
+            '.amazonaws.com/v2/styles/Standard/descriptor?key=' +
+            encodeURIComponent(MAP_CONFIG.apiKey) + '&color-scheme=Light';
+    }
+
+    function initFacilitiesMap(center, facilities) {
+        if (typeof maplibregl === 'undefined') {
+            // MapLibre not loaded yet; retry shortly.
+            setTimeout(function() { initFacilitiesMap(center, facilities); }, 200);
+            return;
+        }
+
+        var mapEl = document.getElementById('facilitiesMap');
+        if (!mapEl) return;
+
+        // Guard: map config must be injected (not available in local preview).
+        if (!MAP_CONFIG.apiKey || MAP_CONFIG.apiKey.indexOf('__MAP_') === 0 ||
+            !MAP_CONFIG.region || MAP_CONFIG.region.indexOf('__AWS_') === 0) {
+            mapEl.innerHTML = '<div class="placeholder-text">Map unavailable in preview.</div>';
+            return;
+        }
+
+        // Create the map once; reuse it on subsequent analyses.
+        if (!facilitiesMap) {
+            facilitiesMap = new maplibregl.Map({
+                container: mapEl,
+                style: amazonLocationStyleUrl(),
+                center: [center.lng, center.lat],
+                zoom: 11,
+            });
+            facilitiesMap.addControl(new maplibregl.NavigationControl(), 'top-right');
+            facilitiesMap.scrollZoom.disable();
+        }
+
+        // Clear previous markers.
+        for (var m = 0; m < facilityMarkers.length; m++) {
+            facilityMarkers[m].remove();
+        }
+        facilityMarkers = [];
+
+        function addMarkers() {
+            var bounds = null;
+            for (var i = 0; i < facilities.length; i++) {
+                (function(index) {
+                    var f = facilities[index];
+                    if (typeof f.lat !== 'number' || typeof f.lng !== 'number') return;
+
+                    var distanceText = f.distance && String(f.distance).trim()
+                        ? String(f.distance).trim() : 'Unavailable';
+                    var popup = new maplibregl.Popup({ offset: 25 }).setHTML(
+                        '<strong>' + escapeHtml(f.name || 'Facility') + '</strong><br>' +
+                        escapeHtml(Array.isArray(f.waste_types) ? f.waste_types.join(', ') : '') + '<br>' +
+                        'Distance: ' + escapeHtml(distanceText)
+                    );
+
+                    var marker = new maplibregl.Marker({ color: '#2e7d32' })
+                        .setLngLat([f.lng, f.lat])
+                        .setPopup(popup)
+                        .addTo(facilitiesMap);
+
+                    marker.getElement().style.cursor = 'pointer';
+                    marker.getElement().addEventListener('click', function() {
+                        focusFacility(index, true);
+                    });
+
+                    facilityMarkers.push(marker);
+
+                    if (!bounds) {
+                        bounds = new maplibregl.LngLatBounds([f.lng, f.lat], [f.lng, f.lat]);
+                    } else {
+                        bounds.extend([f.lng, f.lat]);
+                    }
+                })(i);
+            }
+
+            // Fit to all markers, or center on the provided point.
+            if (bounds && facilityMarkers.length > 1) {
+                facilitiesMap.fitBounds(bounds, { padding: 50, maxZoom: 15 });
+            } else if (facilityMarkers.length === 1) {
+                facilitiesMap.setCenter([facilities[0].lng, facilities[0].lat]);
+                facilitiesMap.setZoom(14);
+            } else {
+                facilitiesMap.setCenter([center.lng, center.lat]);
+                facilitiesMap.setZoom(11);
+            }
+        }
+
+        // Markers can only be added once the style has loaded.
+        if (facilitiesMap.isStyleLoaded()) {
+            addMarkers();
+        } else {
+            facilitiesMap.once('load', addMarkers);
+        }
+
+        // Recalculate size (map lives inside a tab that may have been hidden).
+        setTimeout(function() { facilitiesMap.resize(); }, 100);
+    }
+
+    // Highlight a facility: pan the map, open its popup, and mark the list item.
+    function focusFacility(index, fromMarker) {
+        for (var i = 0; i < facilityItemEls.length; i++) {
+            facilityItemEls[i].classList.toggle('active', i === index);
+        }
+
+        var marker = facilityMarkers[index];
+        if (marker && facilitiesMap) {
+            var lngLat = marker.getLngLat();
+            facilitiesMap.flyTo({
+                center: lngLat,
+                zoom: Math.max(facilitiesMap.getZoom(), 14),
+            });
+            // Open the popup (close others first).
+            for (var p = 0; p < facilityMarkers.length; p++) {
+                var pop = facilityMarkers[p].getPopup();
+                if (pop && pop.isOpen() && p !== index) facilityMarkers[p].togglePopup();
+            }
+            if (!marker.getPopup().isOpen()) marker.togglePopup();
+        }
+
+        // When triggered from the list, scroll the item into view.
+        if (!fromMarker && facilityItemEls[index]) {
+            facilityItemEls[index].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
     }
 
     // --- Invalid input popup ---

@@ -14,6 +14,10 @@ Globals:
     Runtime: python3.12
 
 Resources:
+  # Amazon Location map tiles are rendered client-side via MapLibre using a
+  # browser API key created manually in the console (Maps GetTile only).
+  # Server-side geocoding / place search uses the Lambda role below (geo-places).
+
   # IAM Role for all Lambda functions
   AppBedrockRole:
     Type: AWS::IAM::Role
@@ -41,6 +45,16 @@ Resources:
                   - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/global.anthropic.claude-haiku-4-5*"
                   - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5*"
                   - "arn:aws:bedrock:*::foundation-model/anthropic.claude*"
+        - PolicyName: GeoPlacesPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - geo-places:SearchText
+                  - geo-places:Geocode
+                  - geo-places:GetPlace
+                Resource: "*"
 
   # Waste Details Lambda
   WasteDetailsFunction:
@@ -118,6 +132,23 @@ Resources:
         AuthType: NONE
         InvokeMode: RESPONSE_STREAM
 
+  # Nearby Facilities Lambda (returns JSON, not streamed)
+  NearbyFacilitiesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/nearby_facilities/
+      Handler: run.sh
+      Layers:
+        - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:27"
+      Role: !GetAtt AppBedrockRole.Arn
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          PORT: "8080"
+          DEPLOY_TS: !Ref DeployTimestamp
+      FunctionUrlConfig:
+        AuthType: NONE
+
   # S3 Bucket for Frontend
   FrontendBucket:
     Type: AWS::S3::Bucket
@@ -153,6 +184,10 @@ Outputs:
     Value: !GetAtt EnvironmentalImpactFunctionUrl.FunctionUrl
   SmartWasteAssistantUrl:
     Value: !GetAtt SmartWasteAssistantFunctionUrl.FunctionUrl
+  NearbyFacilitiesUrl:
+    Value: !GetAtt NearbyFacilitiesFunctionUrl.FunctionUrl
+  AwsRegion:
+    Value: !Ref AWS::Region
   WebsiteUrl:
     Value: !GetAtt FrontendBucket.WebsiteURL
   BucketName:
