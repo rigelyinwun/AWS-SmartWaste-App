@@ -214,8 +214,13 @@ def enrich_waste_types(item_description, facility_names):
     return {}
 
 
-def build_fallback(item_description):
-    """Common Malaysian recycling centers used when no location is available."""
+def build_fallback(item_description, reason="no_location", center=None):
+    """Common Malaysian recycling centers used when we can't locate the user.
+    'reason' explains why the fallback was used so the UI can message correctly:
+      - 'no_location'   : the user did not provide a location
+      - 'geocode_failed': a location was given but could not be geocoded
+      - 'no_results'    : location geocoded, but no nearby facilities were found
+    """
     names = [f["name"] for f in MALAYSIA_FALLBACK]
     type_map = enrich_waste_types(item_description, names)
     facilities = []
@@ -232,8 +237,9 @@ def build_fallback(item_description):
             "general_line": bool(f.get("general_line") and f.get("phone")),
         })
     return {
-        "center": DEFAULT_CENTER,
+        "center": center or DEFAULT_CENTER,
         "location_provided": False,
+        "fallback_reason": reason,
         "facilities": facilities,
     }
 
@@ -252,14 +258,14 @@ def analyze(path):
 
         # No location -> Malaysia fallback.
         if not location_text:
-            payload = build_fallback(description)
+            payload = build_fallback(description, reason="no_location")
             return Response(json.dumps(payload), content_type="application/json; charset=utf-8")
 
         # Geocode the user's location.
         geo = geocode(location_text)
         if not geo:
             logger.info("Geocoding failed for '%s'; using fallback", location_text)
-            payload = build_fallback(description)
+            payload = build_fallback(description, reason="geocode_failed")
             return Response(json.dumps(payload), content_type="application/json; charset=utf-8")
 
         lat, lng, label = geo
@@ -268,7 +274,11 @@ def analyze(path):
         pois = search_pois(lat, lng)
         if not pois:
             logger.info("No POIs found near '%s'; using fallback", location_text)
-            payload = build_fallback(description)
+            # We DID locate the user — center the fallback map on them.
+            payload = build_fallback(
+                description, reason="no_results",
+                center={"lat": lat, "lng": lng, "label": label},
+            )
             return Response(json.dumps(payload), content_type="application/json; charset=utf-8")
 
         # Enrich with accepted waste types via Bedrock.

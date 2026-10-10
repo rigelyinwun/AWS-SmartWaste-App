@@ -935,9 +935,19 @@
                 (center.label ? ' (' + escapeHtml(center.label) + ')' : '') + '.';
         } else {
             subheading.className = 'facilities-subheading hint-default';
-            subheading.innerHTML = '<i class="fa-solid fa-circle-info"></i> ' +
-                'No location provided, so these are common recycling stations in Malaysia. ' +
-                'Enter your location above and re-analyze to see stations near you.';
+            var reason = data && data.fallback_reason;
+            var msg;
+            if (reason === 'geocode_failed') {
+                msg = 'We couldn\'t pinpoint that location, so these are common recycling ' +
+                    'stations in Malaysia. Try a more specific location (e.g. city or area).';
+            } else if (reason === 'no_results') {
+                msg = 'No facilities found right near you, so these are common recycling ' +
+                    'stations in Malaysia.';
+            } else {
+                msg = 'No location provided, so these are common recycling stations in Malaysia. ' +
+                    'Enter your location above and re-analyze to see stations near you.';
+            }
+            subheading.innerHTML = '<i class="fa-solid fa-circle-info"></i> ' + msg;
         }
 
         // --- Map ---

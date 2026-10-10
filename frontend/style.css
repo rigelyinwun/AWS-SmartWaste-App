@@ -392,6 +392,9 @@ main {
 /* Run button */
 .run-section {
     text-align: center;
+    padding-bottom: 1.5rem;
+    border-bottom: 2px solid var(--border);
+    margin-bottom: 0.5rem;
 }
 
 .btn-run {
@@ -822,7 +825,7 @@ main {
 /* Flip card: 3D flip on click */
 .env-flip-card {
     perspective: 1000px;
-    height: 240px;
+    height: 300px;
     cursor: pointer;
     outline: none;
     transition: transform 0.2s;
@@ -900,7 +903,7 @@ main {
 
 .env-flip-back-header {
     position: relative;
-    height: 80px;
+    height: 110px;
     flex-shrink: 0;
     background-size: cover;
     background-position: center;
@@ -974,7 +977,7 @@ main {
     }
 
     .env-flip-card {
-        height: 230px;
+        height: 285px;
     }
 }
 
@@ -1699,7 +1702,12 @@ footer {
 /* Map */
 .facilities-map-wrap {
     position: relative;
-    margin-bottom: 1.25rem;
+    margin: 0.5rem 0 1.5rem;
+    padding: 0.5rem;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
 }
 
 .facilities-map {
@@ -1709,11 +1717,12 @@ footer {
     border: 1px solid var(--border);
     z-index: 1;
     background: #e8eef0;
+    overflow: hidden;
 }
 
 .facilities-map-loading {
     position: absolute;
-    inset: 0;
+    inset: 0.5rem;
     display: flex;
     flex-direction: column;
     align-items: center;
