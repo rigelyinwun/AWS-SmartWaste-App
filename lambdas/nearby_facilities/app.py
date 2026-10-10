@@ -97,24 +97,67 @@ def _item_contacts(item):
     return email, phone
 
 
-def geocode(location_text):
-    """Geocode free-form location text to coordinates + a readable label.
-    Returns (lat, lng, label) or None on failure."""
+def _geocode_once(query):
+    """One geocode attempt. Returns (lat,lng,label) or None."""
     try:
-        resp = geo_places.geocode(QueryText=location_text, MaxResults=1)
-        logger.info("geocode raw response for %r: %s", location_text, json.dumps(resp, default=str)[:2000])
+        resp = geo_places.geocode(
+            QueryText=query,
+            MaxResults=1,
+            Filter={"IncludeCountries": ["MYS"]},
+        )
+        logger.info("geocode raw response for %r: %s", query, json.dumps(resp, default=str)[:2000])
         items = resp.get("ResultItems", [])
-        if not items:
-            return None
-        pos = _item_position(items[0])
-        if not pos:
-            return None
-        lng, lat = pos
-        label = _item_label(items[0]) or location_text
-        return (lat, lng, label)
+        if items:
+            pos = _item_position(items[0])
+            if pos:
+                lng, lat = pos
+                return (lat, lng, _item_label(items[0]) or query)
     except Exception as e:
-        logger.error("Geocode error: %s", str(e))
-        return None
+        logger.error("Geocode error for %r: %s", query, str(e))
+    return None
+
+
+def _search_text_once(query):
+    """Fuzzy place/POI lookup fallback. Returns (lat,lng,label) or None."""
+    try:
+        resp = geo_places.search_text(
+            QueryText=query,
+            MaxResults=1,
+            Filter={"IncludeCountries": ["MYS"]},
+        )
+        logger.info("search_text(geocode) raw response for %r: %s", query, json.dumps(resp, default=str)[:2000])
+        items = resp.get("ResultItems", [])
+        if items:
+            pos = _item_position(items[0])
+            if pos:
+                lng, lat = pos
+                return (lat, lng, _item_label(items[0]) or query)
+    except Exception as e:
+        logger.error("search_text geocode error for %r: %s", query, str(e))
+    return None
+
+
+def geocode(location_text):
+    """Resolve free-form location text to coordinates + a readable label.
+    Tries, in order: geocode as-is, geocode with ', Malaysia' appended, then
+    a fuzzy search_text lookup (better for neighborhood/POI names like
+    'Desa Park City'). Biased to Malaysia. Returns (lat, lng, label) or None."""
+    candidates = [location_text]
+    if "malaysia" not in location_text.lower():
+        candidates.append(location_text + ", Malaysia")
+
+    for q in candidates:
+        hit = _geocode_once(q)
+        if hit:
+            return hit
+
+    # Fuzzy fallback — resolves place/POI names that strict geocoding misses.
+    for q in candidates:
+        hit = _search_text_once(q)
+        if hit:
+            return hit
+
+    return None
 
 
 def search_pois(lat, lng):
@@ -128,6 +171,7 @@ def search_pois(lat, lng):
                 BiasPosition=[lng, lat],  # [lng, lat]
                 MaxResults=5,
                 AdditionalFeatures=["Contact"],
+                Filter={"IncludeCountries": ["MYS"]},
             )
             logger.info("search_text raw response for %r: %s", query, json.dumps(resp, default=str)[:2000])
         except Exception as e:
