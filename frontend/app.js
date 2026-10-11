@@ -2243,14 +2243,25 @@
             container.innerHTML = '<div class="placeholder-text">' + emptyMsg + '</div>';
             return;
         }
+        var myId = Auth.profile() && Auth.profile().sub;
+        var isPublic = (mode === 'list');
         var html = '';
         for (var i = 0; i < requests.length; i++) {
             var r = requests[i];
+            var isMine = myId && r.ownerId === myId;
             var loc = r.area || (r.addressMasked ? 'Location on request' : (r.fullAddress || '—'));
             html += '<div class="request-card">';
             html += '<div class="request-card-head">';
             html += '<div class="request-title">' + escapeHtml(r.wasteType || 'Waste item') + '</div>';
-            html += statusBadge(r.status);
+            // Public list shows an "Available" / "Your listing" tag (not the
+            // owner-only lifecycle status). History (posted) keeps the status.
+            if (isPublic) {
+                html += isMine
+                    ? '<span class="status-badge status-mine">Your listing</span>'
+                    : '<span class="status-badge status-available">Available</span>';
+            } else {
+                html += statusBadge(r.status);
+            }
             html += '</div>';
             html += '<div class="request-submitted">Submitted ' + escapeHtml(fmtTime(r.createdAt)) + '</div>';
             html += '<div class="request-meta">';
@@ -2267,7 +2278,18 @@
             html += '</div>';
             html += '<div class="request-actions">';
             html += '<button type="button" class="btn-request-view" data-req="' + escapeHtml(r.requestId) + '">View Details</button>';
-            html += '<button type="button" class="btn-request-track" data-req="' + escapeHtml(r.requestId) + '">Track Request</button>';
+            if (isPublic) {
+                // Public list: request to collect someone else's item. The viewer
+                // cannot request their own listing.
+                if (isMine) {
+                    html += '<button type="button" class="btn-request-track" data-req="' + escapeHtml(r.requestId) + '">Manage</button>';
+                } else {
+                    html += '<button type="button" class="btn-request-collect" data-req="' + escapeHtml(r.requestId) + '">Request Collect</button>';
+                }
+            } else {
+                // History (your posts): track the request lifecycle.
+                html += '<button type="button" class="btn-request-track" data-req="' + escapeHtml(r.requestId) + '">Track Request</button>';
+            }
             html += '</div>';
             html += '</div>';
         }
@@ -2318,7 +2340,11 @@
         if (!btn) return;
         var r = findRequest(btn.getAttribute('data-req'));
         if (!r) return;
-        if (btn.classList.contains('btn-request-view')) {
+        if (btn.classList.contains('btn-request-view') ||
+            btn.classList.contains('btn-request-collect')) {
+            // View Details and Request Collect both open the detail overlay,
+            // which renders the collect/quote form for other users' open items
+            // (and a "this is your listing" note for your own).
             openReqDetail(r);
         } else if (btn.classList.contains('btn-request-track')) {
             // Track -> go to Notifications. For the owner's own item, open the

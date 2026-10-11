@@ -2652,7 +2652,8 @@ body.on-subpage footer {
 }
 
 .btn-request-view,
-.btn-request-track {
+.btn-request-track,
+.btn-request-collect {
     flex: 1;
     padding: 0.6rem 0.75rem;
     border-radius: 10px;
@@ -2684,6 +2685,21 @@ body.on-subpage footer {
     cursor: not-allowed;
 }
 
+.btn-request-collect {
+    background: var(--grad-primary);
+    color: #fff;
+    border: none;
+}
+
+.btn-request-collect:hover {
+    filter: brightness(1.05);
+}
+
+.btn-request-collect:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 /* Status badges */
 .status-badge {
     font-size: 0.72rem;
@@ -2695,6 +2711,8 @@ body.on-subpage footer {
 }
 
 .status-open { background: #fff3e0; color: #e67e00; }
+.status-available { background: #e8f5e9; color: #2e7d32; }
+.status-mine { background: #ede7f6; color: #5e35b1; }
 .status-requested { background: #e3f2fd; color: #1565c0; }
 .status-accepted { background: #e3f2fd; color: #1565c0; }
 .status-collecting { background: #e3f2fd; color: #1565c0; }
