@@ -2624,7 +2624,7 @@
             if (cr.status === 'requested') {
                 actions = '<button type="button" class="btn-profile-primary" data-approve="' + crId + '"><i class="fa-solid fa-check"></i> Accept</button>';
             } else if (cr.status === 'accepted') {
-                actions = '<button type="button" class="btn-profile-primary" data-confirm="' + crId + '"><i class="fa-solid fa-handshake"></i> Confirm deal</button>' +
+                actions = '<button type="button" class="btn-profile-primary" data-confirm="' + crId + '"' + payAttrs(cr) + '><i class="fa-solid fa-handshake"></i> Confirm deal</button>' +
                           '<button type="button" class="btn-profile-secondary" data-cancel="' + crId + '"><i class="fa-solid fa-xmark"></i> Cancel</button>';
             } else if (cr.unlocked === true) {
                 actions = '<button type="button" class="btn-profile-secondary" data-open="' + crId + '"><i class="fa-solid fa-eye"></i> View details</button>';
@@ -2664,7 +2664,7 @@
             // phone is shown — the unlock point is strictly server-driven and
             // only opens after Confirm deal flips cr.unlocked server-side.
             html += '<p class="unlock-note">You picked this quote. Confirm to share your address and open chat.</p>';
-            actions = '<button type="button" class="btn-profile-primary" data-confirm="' + crId + '"><i class="fa-solid fa-handshake"></i> Confirm deal</button>' +
+            actions = '<button type="button" class="btn-profile-primary" data-confirm="' + crId + '"' + payAttrs(cr) + '><i class="fa-solid fa-handshake"></i> Confirm deal</button>' +
                       '<button type="button" class="btn-profile-secondary" data-cancel="' + crId + '"><i class="fa-solid fa-xmark"></i> Cancel</button>';
         } else if (cr && cr.unlocked === true) {
             // Server-driven unlock: cr.unlocked is true only for statuses in
@@ -2696,6 +2696,72 @@
         wireNotifDetailActions();
     }
 
+    // Build the data-pay-* attributes for a Confirm-deal button. A paid item
+    // carries its quote amount + currency so the confirm handler can show the
+    // mock payment screen; a free item (no quoteAmount) carries nothing, so it
+    // confirms with no payment step.
+    function payAttrs(cr) {
+        if (!cr || cr.quoteAmount == null) return '';
+        return ' data-pay-amount="' + escapeHtml(String(cr.quoteAmount)) +
+               '" data-pay-currency="' + escapeHtml(cr.currency || 'MYR') + '"';
+    }
+
+    // ---- Mock payment screen (DEMO ONLY — no real money, no payment processor) ----
+    // Shows a fake "pay" dialog at the point where the real Stripe payment will
+    // live in Phase 2. On "Pay now" it simply invokes onPaid(); it NEVER contacts
+    // a payment service and moves no money. Built dynamically so it needs no
+    // index.html markup, reusing the app's .overlay/.show convention.
+    var _mockPayOverlay = null;
+    function showMockPayment(amount, currency, onPaid) {
+        if (!_mockPayOverlay) {
+            _mockPayOverlay = document.createElement('div');
+            _mockPayOverlay.className = 'overlay mock-pay-overlay';
+            _mockPayOverlay.innerHTML =
+                '<div class="overlay-card mock-pay-card">' +
+                  '<div class="mock-pay-demo-tag">DEMO — no real payment is taken</div>' +
+                  '<h3 class="mock-pay-title"><i class="fa-solid fa-credit-card"></i> Pay for collection</h3>' +
+                  '<div class="mock-pay-amount" id="mockPayAmount"></div>' +
+                  '<label class="mock-pay-label">Card number</label>' +
+                  '<input class="mock-pay-input" id="mockPayCard" value="4242 4242 4242 4242" readonly>' +
+                  '<div class="mock-pay-row">' +
+                    '<div><label class="mock-pay-label">Expiry</label>' +
+                      '<input class="mock-pay-input" value="12 / 34" readonly></div>' +
+                    '<div><label class="mock-pay-label">CVC</label>' +
+                      '<input class="mock-pay-input" value="123" readonly></div>' +
+                  '</div>' +
+                  '<div class="mock-pay-actions">' +
+                    '<button type="button" class="btn-profile-secondary" id="mockPayCancel">Cancel</button>' +
+                    '<button type="button" class="btn-profile-primary" id="mockPayNow"><i class="fa-solid fa-lock"></i> Pay now</button>' +
+                  '</div>' +
+                  '<p class="mock-pay-note">Placeholder for the Phase 2 Stripe payment. No card is charged.</p>' +
+                '</div>';
+            document.body.appendChild(_mockPayOverlay);
+            _mockPayOverlay.addEventListener('click', function(e) {
+                if (e.target === _mockPayOverlay) closeMockPayment();
+            });
+        }
+        var amtEl = _mockPayOverlay.querySelector('#mockPayAmount');
+        amtEl.textContent = (currency || 'MYR') + ' ' + amount;
+
+        var payBtn = _mockPayOverlay.querySelector('#mockPayNow');
+        var cancelBtn = _mockPayOverlay.querySelector('#mockPayCancel');
+        // Replace handlers each open so a stale callback never fires.
+        var newPay = payBtn.cloneNode(true);
+        payBtn.parentNode.replaceChild(newPay, payBtn);
+        var newCancel = cancelBtn.cloneNode(true);
+        cancelBtn.parentNode.replaceChild(newCancel, cancelBtn);
+        newPay.addEventListener('click', function() {
+            closeMockPayment();
+            if (typeof onPaid === 'function') onPaid();
+        });
+        newCancel.addEventListener('click', closeMockPayment);
+
+        _mockPayOverlay.classList.add('show');
+    }
+    function closeMockPayment() {
+        if (_mockPayOverlay) _mockPayOverlay.classList.remove('show');
+    }
+
     function wireNotifDetailActions() {
         function act(suffix, id, btn) {
             btn.disabled = true;
@@ -2712,14 +2778,39 @@
             });
         }
 
-        // Approve / reject / confirm / cancel all post {collectRequestId} and
-        // refresh via act(). Multiple quote cards can be present, so wire every
-        // matching button, not just the first.
+        // Approve / reject / done / cancel post {collectRequestId} and refresh.
+        // Multiple quote cards can be present, so wire every matching button.
         bindAll('[data-approve]', 'approve');
         bindAll('[data-reject]', 'reject');
         bindAll('[data-done]', 'done');
-        bindAll('[data-confirm]', 'confirm');
         bindAll('[data-cancel]', 'cancel');
+
+        // Confirm deal: for a PAID item (the button carries a pay amount) show a
+        // mock payment screen first, and only run the real 'confirm' action after
+        // "Pay". A free item (no amount) confirms directly. The mock screen moves
+        // NO money and has no payment processor — it is a demo placeholder that
+        // marks exactly where the Phase 2 Stripe payment will later slot in.
+        (function() {
+            var confirmBtns = notifDetailEl.querySelectorAll('[data-confirm]');
+            for (var i = 0; i < confirmBtns.length; i++) {
+                (function(btn) {
+                    btn.addEventListener('click', function() {
+                        var id = btn.getAttribute('data-confirm');
+                        var amount = btn.getAttribute('data-pay-amount');
+                        var currency = btn.getAttribute('data-pay-currency') || 'MYR';
+                        if (amount) {
+                            // Paid item: run the mock payment screen, then confirm.
+                            showMockPayment(amount, currency, function() {
+                                act('confirm', id, btn);
+                            });
+                        } else {
+                            // Free item: no payment, confirm directly.
+                            act('confirm', id, btn);
+                        }
+                    });
+                })(confirmBtns[i]);
+            }
+        })();
 
         function bindAll(selector, suffix) {
             var attr = selector.replace(/[\[\]]/g, '');  // 'data-approve'
