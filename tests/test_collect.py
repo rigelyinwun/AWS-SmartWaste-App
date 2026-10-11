@@ -279,3 +279,222 @@ def test_bucket_timeseries_year_granularity_when_span_large():
     labels = [p["label"] for p in ts["points"]]
     assert labels == sorted(labels)
     assert "2020" in labels and "2024" in labels
+
+
+# ===================== Free-giveaway lane (request_collect) =====================
+# These tests drive request_collect with lightweight fakes for the module-level
+# AWS handles so the pure routing/gate logic runs without hitting AWS. The
+# collect-request table captures put_item so we can assert what was persisted.
+
+class _CaptureTable:
+    """Captures put_item and returns no live quotes from the duplicate scan."""
+    def __init__(self):
+        self.put_items = []
+
+    def put_item(self, Item=None, **k):
+        self.put_items.append(Item)
+
+    def query(self, **k):
+        # No existing quotes -> never a duplicate-live-quote conflict.
+        return {"Items": []}
+
+
+def _status_of(resp):
+    """request_collect returns a flask _Response stub (error) or a dict
+    (_creq_view success). Normalize to an HTTP-ish status for assertions."""
+    return getattr(resp, "status", 200)
+
+
+def _setup_request_collect(monkeypatch, waste, approved=False):
+    """Wire request_collect's module globals to fakes. `approved` controls
+    whether the calling user is an approved collector."""
+    cap = _CaptureTable()
+    monkeypatch.setattr(app, "creq_table", cap)
+    # `table` just needs to be truthy for the service-available guard; _get_waste
+    # is patched to return our waste object directly.
+    monkeypatch.setattr(app, "table", object())
+    monkeypatch.setattr(app, "_get_waste", lambda wid: waste)
+    monkeypatch.setattr(app, "_is_approved_collector", lambda uid: approved)
+    monkeypatch.setattr(app, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(app, "_now_micros", lambda: 1)
+    return cap
+
+
+def _open_waste(price_type, owner="owner-1", max_price=None):
+    w = {"requestId": "w1", "ownerId": owner, "status": "open",
+         "wasteType": "Bottles", "priceType": price_type, "currency": "MYR"}
+    if max_price is not None:
+        w["maxPrice"] = max_price
+    return w
+
+
+# (a) free listing lets a NON-approved-collector user pass the gate (no 403).
+def test_request_collect_free_allows_non_collector(monkeypatch):
+    cap = _setup_request_collect(monkeypatch, _open_waste("free"), approved=False)
+    resp = app.request_collect({"sub": "user-2", "name": "Ann"},
+                               {"wasteId": "w1"})
+    # Success path returns a _creq_view dict, not a 403 Response.
+    assert isinstance(resp, dict)
+    assert _status_of(resp) == 200
+    assert len(cap.put_items) == 1
+    # No quote amount recorded for a free collect.
+    assert cap.put_items[0]["quoteAmount"] is None
+
+
+# (b) a free collect with no quoteAmount is accepted (no 400).
+def test_request_collect_free_no_amount_no_400(monkeypatch):
+    _setup_request_collect(monkeypatch, _open_waste("free"), approved=False)
+    # Body omits quoteAmount entirely.
+    resp = app.request_collect({"sub": "user-2"}, {"wasteId": "w1"})
+    assert isinstance(resp, dict)
+    assert _status_of(resp) == 200
+
+
+# (c) paid listing STILL 403s a non-approved collector (regression).
+def test_request_collect_paid_still_403s_non_collector(monkeypatch):
+    _setup_request_collect(monkeypatch, _open_waste("user_pays"), approved=False)
+    resp = app.request_collect({"sub": "user-2"},
+                               {"wasteId": "w1", "quoteAmount": "10.00"})
+    assert _status_of(resp) == 403
+
+
+# (c) paid listing STILL 400s an over-ceiling / invalid quote (regression).
+def test_request_collect_paid_still_400s_over_ceiling(monkeypatch):
+    _setup_request_collect(monkeypatch,
+                           _open_waste("user_pays", max_price="20.00"),
+                           approved=True)
+    # Over the owner's ceiling -> 400.
+    resp = app.request_collect({"sub": "user-2"},
+                               {"wasteId": "w1", "quoteAmount": "50.00"})
+    assert _status_of(resp) == 400
+    # Missing amount on a paid item -> 400 (positive amount required).
+    resp2 = app.request_collect({"sub": "user-2"},
+                                {"wasteId": "w1"})
+    assert _status_of(resp2) == 400
+
+
+# (c) paid listing accepts a valid within-ceiling quote from an approved collector.
+def test_request_collect_paid_accepts_valid_quote(monkeypatch):
+    cap = _setup_request_collect(monkeypatch,
+                                 _open_waste("user_pays", max_price="20.00"),
+                                 approved=True)
+    resp = app.request_collect({"sub": "user-2"},
+                               {"wasteId": "w1", "quoteAmount": "15.00"})
+    assert isinstance(resp, dict)
+    from decimal import Decimal
+    assert cap.put_items[0]["quoteAmount"] == Decimal("15.00")
+
+
+# (d) unknown/bogus priceType falls back to paid (user_pays) so the free lane
+#     cannot be opened by a bad value — a non-collector still gets 403.
+def test_request_collect_bogus_pricetype_is_business_gated(monkeypatch):
+    # NOTE: request_collect itself only treats EXACTLY 'free' as free; any other
+    # value (incl. junk) stays on the business-gated paid path.
+    _setup_request_collect(monkeypatch, _open_waste("totally-bogus"),
+                           approved=False)
+    resp = app.request_collect({"sub": "user-2"},
+                               {"wasteId": "w1", "quoteAmount": "10.00"})
+    assert _status_of(resp) == 403
+
+
+# Guards that MUST still apply to free items.
+def test_request_collect_free_self_collect_still_400(monkeypatch):
+    _setup_request_collect(monkeypatch, _open_waste("free", owner="user-2"),
+                           approved=False)
+    resp = app.request_collect({"sub": "user-2"}, {"wasteId": "w1"})
+    assert _status_of(resp) == 400  # self-collect guard
+
+
+def test_request_collect_free_closed_item_still_409(monkeypatch):
+    waste = _open_waste("free")
+    waste["status"] = "collected"
+    _setup_request_collect(monkeypatch, waste, approved=False)
+    resp = app.request_collect({"sub": "user-2"}, {"wasteId": "w1"})
+    assert _status_of(resp) == 409  # item no longer available
+
+
+def test_request_collect_free_duplicate_live_quote_still_409(monkeypatch):
+    cap = _setup_request_collect(monkeypatch, _open_waste("free"), approved=False)
+
+    # Make the duplicate-scan return a live quote by the same collector.
+    def _query(**k):
+        return {"Items": [{"collectorId": "user-2", "status": "requested"}]}
+    cap.query = _query
+    resp = app.request_collect({"sub": "user-2"}, {"wasteId": "w1"})
+    assert _status_of(resp) == 409  # duplicate live quote
+
+
+# (e) disintermediation invariant for a FREE item: a freshly-created free quote
+#     is 'requested' -> contact/chat MUST stay locked (nothing unlocks before
+#     'confirmed'). The lifecycle is shared, so _creq_view enforces this.
+def test_free_item_quote_locked_until_confirmed(monkeypatch):
+    cap = _setup_request_collect(monkeypatch, _open_waste("free"), approved=False)
+    resp = app.request_collect({"sub": "user-2"}, {"wasteId": "w1"})
+    assert resp["status"] == "requested"
+    assert not resp.get("unlocked")
+    assert "fullAddress" not in resp
+    assert "ownerPhone" not in resp
+    assert app._chat_enabled({"status": "requested"}) is False
+    # The persisted record is a normal collect-request that flows through the
+    # same accept -> confirm machine; it only unlocks at a confirmed status.
+    stored = cap.put_items[0]
+    assert stored["status"] == "requested"
+    waste = _open_waste("free")
+    assert app._creq_view(stored, waste).get("unlocked") is not True
+
+
+# ===================== create_report priceType whitelist =====================
+
+def _setup_create_report(monkeypatch):
+    """Fake the image validator + waste table so create_report runs offline and
+    we can inspect the persisted item."""
+    cap = _CaptureTable()
+    monkeypatch.setattr(app, "table", cap)
+    monkeypatch.setattr(app, "validate_image", lambda *a, **k: True)
+    return cap
+
+
+def _report_body(**over):
+    body = {
+        "contactName": "Jane", "phone": "+60123456789", "fullAddress": "123 St",
+        "wasteType": "Bottles", "category": "plastic", "weight": "2kg",
+        "file_data": "x", "file_mime": "image/png",
+    }
+    body.update(over)
+    return body
+
+
+def test_create_report_free_records_free_and_no_max_price(monkeypatch):
+    cap = _setup_create_report(monkeypatch)
+    app.create_report({"sub": "u1", "name": "Jane", "email": "j@x.com"},
+                      _report_body(priceType="free", maxPrice="20.00"))
+    item = cap.put_items[0]
+    assert item["priceType"] == "free"
+    # A free listing records NO maxPrice even if one is sent.
+    assert "maxPrice" not in item
+
+
+def test_create_report_user_pays_keeps_max_price(monkeypatch):
+    cap = _setup_create_report(monkeypatch)
+    app.create_report({"sub": "u1"},
+                      _report_body(priceType="user_pays", maxPrice="20.00"))
+    item = cap.put_items[0]
+    assert item["priceType"] == "user_pays"
+    from decimal import Decimal
+    assert item["maxPrice"] == Decimal("20.00")
+
+
+def test_create_report_unknown_pricetype_falls_back_to_user_pays(monkeypatch):
+    # A bogus priceType must fail safe toward the paid, business-gated lane so a
+    # bad value can never open the free collect lane.
+    cap = _setup_create_report(monkeypatch)
+    app.create_report({"sub": "u1"}, _report_body(priceType="totally-bogus"))
+    assert cap.put_items[0]["priceType"] == "user_pays"
+
+
+def test_create_report_missing_pricetype_defaults_to_user_pays(monkeypatch):
+    cap = _setup_create_report(monkeypatch)
+    body = _report_body()
+    body.pop("priceType", None)
+    app.create_report({"sub": "u1"}, body)
+    assert cap.put_items[0]["priceType"] == "user_pays"

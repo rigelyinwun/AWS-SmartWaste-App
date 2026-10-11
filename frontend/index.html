@@ -279,10 +279,17 @@ What would you like to know about waste disposal?</div>
                     <input type="text" id="rfArea" placeholder="e.g. Cyberjaya, Selangor">
                 </div>
                 <div class="auth-field">
+                    <label for="rfPriceType">Listing type</label>
+                    <select id="rfPriceType">
+                        <option value="user_pays" selected>Paid pickup (a verified business collects)</option>
+                        <option value="free">Give away for free (any user can collect)</option>
+                    </select>
+                </div>
+                <div class="auth-field" id="rfMaxPriceField">
                     <label for="rfMaxPrice">Maximum price you'll pay (optional)</label>
                     <input type="number" id="rfMaxPrice" step="0.01" min="0" placeholder="e.g. 20.00">
                 </div>
-                <div class="auth-field">
+                <div class="auth-field" id="rfCurrencyField">
                     <label for="rfCurrency">Currency</label>
                     <select id="rfCurrency">
                         <option value="MYR" selected>MYR</option>

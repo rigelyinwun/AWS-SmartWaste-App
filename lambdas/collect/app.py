@@ -555,13 +555,19 @@ def create_report(claims, body):
         "pickupTime": _s(body.get("pickupTime")),
         "notes": _s(body.get("notes"))[:500],
     }
-    # Type B pricing (optional, backward-compatible). Readers treat a missing
+    # Pricing (optional, backward-compatible). Readers treat a missing
     # priceType as "user_pays" and a missing maxPrice as "no ceiling".
-    item["priceType"] = _s(body.get("priceType")) or "user_pays"
+    # priceType is whitelisted to {'free','user_pays'}; anything unknown falls
+    # back to 'user_pays' so a bogus value fails safe toward the paid, business-
+    # gated lane (it must never accidentally open the free collect lane).
+    price_type = _s(body.get("priceType"))
+    item["priceType"] = price_type if price_type in ("free", "user_pays") else "user_pays"
     item["currency"] = (_s(body.get("currency")) or "MYR")[:3].upper()
-    max_price = _dec_price(body.get("maxPrice"))
-    if max_price is not None:
-        item["maxPrice"] = max_price
+    # A free giveaway has no price ceiling — do not record maxPrice for it.
+    if item["priceType"] != "free":
+        max_price = _dec_price(body.get("maxPrice"))
+        if max_price is not None:
+            item["maxPrice"] = max_price
     lat, lng = dec(body.get("lat")), dec(body.get("lng"))
     if lat is not None and lng is not None:
         item["lat"] = lat
@@ -862,19 +868,30 @@ def request_collect(claims, body):
     #     item). Under multi-quote the item stays 'open' while quotes accumulate.
     if waste.get("status") not in ("open", None):
         return json_response({"error": "This item is no longer available"}, status=409)
+    # A free giveaway ('free') is collectable by ANY logged-in user — the paid
+    # lane ('user_pays', incl. a missing/legacy value) stays business-gated and
+    # quote-validated below. This flag forks ONLY steps (6)+(7); the rest of the
+    # lifecycle is identical for free and paid.
+    is_free = (waste.get("priceType") or "user_pays") == "free"
     # (6) collector verification: only approved collectors may quote on a Type B
-    #     ("user_pays") listing. Single enforcement point; fails closed.
-    if (waste.get("priceType") or "user_pays") == "user_pays":
+    #     ("user_pays") listing. Single enforcement point; fails closed. Free
+    #     items skip this gate so any logged-in user can collect them.
+    if not is_free:
         if not _is_approved_collector(claims["sub"]):
             return json_response(
                 {"error": "Only verified collector businesses can quote on paid pickups"},
                 status=403)
-    # (7) parse + validate the quote against the listing's live maxPrice ceiling.
+    # (7) parse + validate the quote. A free collect needs no amount — accept a
+    #     missing/blank/zero amount cleanly and store None. The paid path keeps
+    #     the full positive-amount + maxPrice-ceiling validation unchanged.
     amount = _dec_price(body.get("quoteAmount"))
     message = _s(body.get("message"))[:500]
-    ok, err = _validate_quote(amount, _dec_price(waste.get("maxPrice")))
-    if not ok:
-        return json_response({"error": err}, status=400)
+    if is_free:
+        amount = None
+    else:
+        ok, err = _validate_quote(amount, _dec_price(waste.get("maxPrice")))
+        if not ok:
+            return json_response({"error": err}, status=400)
     # (8) reject a duplicate live quote by the same collector on this item. The
     #     wasteIndex GSI is keyed by wasteId (not collector), so paginate the full
     #     result set and filter collector-identity + live-status in Lambda.

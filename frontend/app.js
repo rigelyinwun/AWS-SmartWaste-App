@@ -1787,6 +1787,9 @@
         document.getElementById('rfArea').value = locationInput.value.trim() || '';
         document.getElementById('rfMaxPrice').value = '';
         document.getElementById('rfCurrency').value = 'MYR';
+        var rfPriceTypeEl = document.getElementById('rfPriceType');
+        if (rfPriceTypeEl) rfPriceTypeEl.value = 'user_pays';
+        updatePriceTypeFields();
         document.getElementById('rfPickup').value = '';
         document.getElementById('rfNotes').value = '';
         hideEl('reportError'); hideEl('reportSuccess');
@@ -1805,6 +1808,25 @@
     function closeReportForm() {
         reportOverlay.classList.remove('show');
     }
+
+    // Toggle the price fields based on the chosen listing type. A free giveaway
+    // has no price, so hide/disable max-price + currency; a paid pickup keeps them.
+    function updatePriceTypeFields() {
+        var sel = document.getElementById('rfPriceType');
+        var isFree = sel && sel.value === 'free';
+        var maxField = document.getElementById('rfMaxPriceField');
+        var curField = document.getElementById('rfCurrencyField');
+        var maxInput = document.getElementById('rfMaxPrice');
+        if (maxField) maxField.style.display = isFree ? 'none' : '';
+        if (curField) curField.style.display = isFree ? 'none' : '';
+        if (maxInput) {
+            maxInput.disabled = !!isFree;
+            if (isFree) maxInput.value = '';
+        }
+    }
+
+    var rfPriceTypeInput = document.getElementById('rfPriceType');
+    if (rfPriceTypeInput) rfPriceTypeInput.addEventListener('change', updatePriceTypeFields);
 
     if (allowCollectBtn) allowCollectBtn.addEventListener('click', openReportForm);
     if (reportClose) reportClose.addEventListener('click', closeReportForm);
@@ -1839,14 +1861,21 @@
             return;
         }
 
-        // Optional max price the owner is willing to pay for removal (Type B).
-        var maxPriceRaw = document.getElementById('rfMaxPrice').value.trim();
+        // Listing type: 'free' (any user collects, no price) vs 'user_pays' (a
+        // verified business collects, owner pays). Default to paid.
+        var priceTypeEl = document.getElementById('rfPriceType');
+        var priceType = (priceTypeEl && priceTypeEl.value === 'free') ? 'free' : 'user_pays';
+
+        // Optional max price the owner is willing to pay for removal — paid only.
         var maxPrice = null;
-        if (maxPriceRaw) {
-            maxPrice = parseFloat(maxPriceRaw);
-            if (isNaN(maxPrice) || maxPrice <= 0) {
-                showMsg('reportError', 'Maximum price must be a number greater than 0.', true);
-                return;
+        if (priceType !== 'free') {
+            var maxPriceRaw = document.getElementById('rfMaxPrice').value.trim();
+            if (maxPriceRaw) {
+                maxPrice = parseFloat(maxPriceRaw);
+                if (isNaN(maxPrice) || maxPrice <= 0) {
+                    showMsg('reportError', 'Maximum price must be a number greater than 0.', true);
+                    return;
+                }
             }
         }
 
@@ -1862,14 +1891,18 @@
             area: document.getElementById('rfArea').value.trim(),
             pickupTime: document.getElementById('rfPickup').value.trim(),
             notes: document.getElementById('rfNotes').value.trim(),
-            // Type B: the owner pays a collector to remove the item.
-            priceType: 'user_pays',
-            currency: document.getElementById('rfCurrency').value,
+            // 'free' = give away (any user collects); 'user_pays' = owner pays a
+            // verified business to remove it.
+            priceType: priceType,
             // Sent so the server can re-validate the image before listing.
             file_data: fileData,
             file_mime: fileMime,
         };
-        if (maxPrice !== null) body.maxPrice = maxPrice;
+        // Currency + maxPrice only apply to the paid lane.
+        if (priceType !== 'free') {
+            body.currency = document.getElementById('rfCurrency').value;
+            if (maxPrice !== null) body.maxPrice = maxPrice;
+        }
 
         reportSubmit.disabled = true;
         collectFetch('POST', body, 'report').then(function() {
@@ -2212,6 +2245,12 @@
             if (r.pickupTime) html += '<div><i class="fa-solid fa-clock"></i> ' + escapeHtml(r.pickupTime) + '</div>';
             html += '<div><i class="fa-solid fa-box"></i> ' +
                 escapeHtml((r.category || 'Waste') + (r.weight ? ' • ' + r.weight : '')) + '</div>';
+            if (r.priceType === 'free') {
+                html += '<div><i class="fa-solid fa-gift"></i> Free giveaway</div>';
+            } else if (r.maxPrice != null) {
+                html += '<div><i class="fa-solid fa-tag"></i> Up to ' +
+                    escapeHtml(String(r.maxPrice) + ' ' + (r.currency || 'MYR')) + '</div>';
+            }
             html += '</div>';
             html += '<div class="request-actions">';
             html += '<button type="button" class="btn-request-view" data-req="' + escapeHtml(r.requestId) + '">View Details</button>';
@@ -2332,7 +2371,14 @@
             reqDetailActions.innerHTML =
                 '<span class="req-detail-note">This is your listing. Manage requests in Notifications.</span>';
         } else if (r.status === 'open' || r.status === 'requested') {
-            // Collector action: submit a priced quote. Gate the amount form on
+            // Free giveaway: ANY logged-in user can collect, so skip the
+            // collector-status gate and show the (price-less) collect form.
+            if (r.priceType === 'free') {
+                renderQuoteForm(r);
+                reqDetailOverlay.classList.add('show');
+                return;
+            }
+            // Paid pickup: submit a priced quote. Gate the amount form on
             // /collector/me — only an approved collector sees it; everyone else
             // sees the apply CTA. The server still re-checks on submit.
             reqDetailActions.innerHTML =
@@ -2365,35 +2411,44 @@
         reqDetailOverlay.classList.add('show');
     }
 
-    // Render the collector "Submit Quote" form inside the request-detail overlay.
+    // Render the collect/"Submit Quote" form inside the request-detail overlay.
+    // Free giveaways ask for no price; paid pickups keep the quote-amount input.
     function renderQuoteForm(r) {
+        var isFree = r.priceType === 'free';
         var hint = '';
-        if (r.maxPrice) {
+        if (isFree) {
+            hint = '<p class="req-detail-note">Free giveaway — no payment. Send a request to collect it.</p>';
+        } else if (r.maxPrice) {
             hint = '<p class="req-detail-note">Owner\'s max: ' + escapeHtml(String(r.maxPrice)) +
                 ' ' + escapeHtml(r.currency || 'MYR') + '</p>';
         }
+        var amountField = isFree ? '' :
+            '<div class="auth-field"><label for="quoteAmount">Your quote amount</label>' +
+            '<input type="number" id="quoteAmount" step="0.01" min="0" placeholder="e.g. 15.00"></div>';
         reqDetailActions.innerHTML =
             hint +
-            '<div class="auth-field"><label for="quoteAmount">Your quote amount</label>' +
-            '<input type="number" id="quoteAmount" step="0.01" min="0" placeholder="e.g. 15.00"></div>' +
+            amountField +
             '<div class="auth-field"><label for="quoteMessage">Message (optional)</label>' +
             '<textarea id="quoteMessage" rows="2" placeholder="Add a note for the owner"></textarea></div>' +
-            '<button type="button" class="btn-profile-primary" id="reqQuoteBtn">Submit Quote</button>';
+            '<button type="button" class="btn-profile-primary" id="reqQuoteBtn">' +
+            (isFree ? 'Request to Collect' : 'Submit Quote') + '</button>';
 
         var quoteBtn = document.getElementById('reqQuoteBtn');
         if (quoteBtn) quoteBtn.addEventListener('click', function() {
             hideEl('reqDetailError'); hideEl('reqDetailSuccess');
-            var amtRaw = document.getElementById('quoteAmount').value.trim();
-            var amt = parseFloat(amtRaw);
-            if (!amtRaw || isNaN(amt) || amt <= 0) {
-                showMsg('reqDetailError', 'Enter a quote amount greater than 0.', true);
-                return;
-            }
             var body = {
                 wasteId: r.requestId,
-                quoteAmount: amt,
                 message: document.getElementById('quoteMessage').value.trim(),
             };
+            if (!isFree) {
+                var amtRaw = document.getElementById('quoteAmount').value.trim();
+                var amt = parseFloat(amtRaw);
+                if (!amtRaw || isNaN(amt) || amt <= 0) {
+                    showMsg('reqDetailError', 'Enter a quote amount greater than 0.', true);
+                    return;
+                }
+                body.quoteAmount = amt;
+            }
             quoteBtn.disabled = true;
             collectFetch('POST', body, 'request').then(function() {
                 showMsg('reqDetailSuccess', 'Quote sent! The owner will review it.', false);
