@@ -1997,22 +1997,55 @@
         postedEl.innerHTML = '<div class="placeholder-text">Loading your posts...</div>';
         collectedEl.innerHTML = '<div class="placeholder-text">Loading your collections...</div>';
 
-        collectFetch('GET', null, 'mine').then(function(data) {
-            var mine = (data && data.requests) || [];
-            portalRequests.history = mine;
-            renderPortalCards(postedEl, mine, 'posted');
-        }).catch(function(err) {
-            postedEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
-        });
-
+        // Fetch the collect-requests FIRST so the owner's 'incoming' lifecycle
+        // statuses are available when we render the posted (waste-item) cards.
+        // 'incoming' = collect-requests on MY posted items; its collect-request
+        // status (confirmed/collected) drives the History Mark-as-Collected
+        // button, which the waste-item status (open/collecting/collected) must
+        // NOT — the two status spaces are deliberately kept separate here.
         collectFetch('GET', null, 'requests').then(function(data) {
+            var incoming = (data && data.incoming) || [];
             var outgoing = (data && data.outgoing) || [];
+
+            // Build wasteId -> most relevant incoming collect-request, preferring
+            // 'confirmed' (active button) over 'collected' (disabled button).
+            var crByWaste = {};
+            incoming.forEach(function(cr) {
+                if (!cr || !cr.wasteId) return;
+                var existing = crByWaste[cr.wasteId];
+                if (!existing) {
+                    if (cr.status === 'confirmed' || cr.status === 'collected') {
+                        crByWaste[cr.wasteId] = cr;
+                    }
+                } else if (existing.status !== 'confirmed' && cr.status === 'confirmed') {
+                    crByWaste[cr.wasteId] = cr;
+                }
+            });
+
+            // Posted cards (owner side) rendered with the reconciled lookup.
+            collectFetch('GET', null, 'mine').then(function(mdata) {
+                var mine = (mdata && mdata.requests) || [];
+                portalRequests.history = mine;
+                renderPortalCards(postedEl, mine, 'posted', crByWaste);
+            }).catch(function(err) {
+                postedEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
+            });
+
             var collected = outgoing.filter(function(r) {
                 return (r.status === 'collected' || r.status === 'done');
             });
             renderCollectedCards(collectedEl, collected);
         }).catch(function(err) {
             collectedEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
+            // Still render posted cards (without lifecycle reconciliation) so the
+            // History Posted list is not blocked by a requests-fetch failure.
+            collectFetch('GET', null, 'mine').then(function(mdata) {
+                var mine = (mdata && mdata.requests) || [];
+                portalRequests.history = mine;
+                renderPortalCards(postedEl, mine, 'posted', {});
+            }).catch(function(err2) {
+                postedEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err2.message) + '</div>';
+            });
         });
 
         loadAnalytics();
@@ -2150,7 +2183,14 @@
             if (r.area) html += '<div><i class="fa-solid fa-location-dot"></i> ' + escapeHtml(r.area) + '</div>';
             html += '<div><i class="fa-solid fa-box"></i> ' +
                 escapeHtml((r.category || 'Waste') + (r.weight ? ' • ' + r.weight : '')) + '</div>';
-            html += '</div></div>';
+            html += '</div>';
+            // These items are terminal (filtered to collected/done). Show a
+            // purely-visual DISABLED "Collected" button so NO active
+            // mark-as-collected affordance exists on the collector History side.
+            html += '<div class="request-actions">' +
+                '<button type="button" class="btn-request-track" disabled>' +
+                '<i class="fa-solid fa-flag-checkered"></i> Collected</button></div>';
+            html += '</div>';
         }
         container.innerHTML = html;
     }
@@ -2248,7 +2288,8 @@
         try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return ''; }
     }
 
-    function renderPortalCards(container, requests, mode) {
+    function renderPortalCards(container, requests, mode, crByWaste) {
+        crByWaste = crByWaste || {};
         if (!requests.length) {
             var emptyMsg = 'No open requests right now.';
             if (mode === 'posted') emptyMsg = 'You haven\'t listed any waste yet.';
@@ -2300,8 +2341,22 @@
                     html += '<button type="button" class="btn-request-collect" data-req="' + escapeHtml(r.requestId) + '">Request Collect</button>';
                 }
             } else {
-                // History (your posts): track the request lifecycle.
-                html += '<button type="button" class="btn-request-track" data-req="' + escapeHtml(r.requestId) + '">Track Request</button>';
+                // History (your posts): the button is driven by the matching
+                // COLLECT-REQUEST status (confirmed/collected) from crByWaste,
+                // never by the waste-item status. 'confirmed' -> active Mark as
+                // Collected; 'collected' -> disabled "Collected"; otherwise the
+                // usual Track Request. All mark-as-collected buttons funnel
+                // through the same 'done' action (see onPortalCardClick).
+                var cr = crByWaste[r.requestId];
+                if (cr && cr.status === 'confirmed') {
+                    html += '<button type="button" class="btn-request-track" data-done-cr="' + escapeHtml(cr.collectRequestId) + '">' +
+                        '<i class="fa-solid fa-flag-checkered"></i> Mark as Collected</button>';
+                } else if (cr && cr.status === 'collected') {
+                    html += '<button type="button" class="btn-request-track" data-done-cr="' + escapeHtml(cr.collectRequestId) + '" disabled>' +
+                        '<i class="fa-solid fa-flag-checkered"></i> Collected</button>';
+                } else {
+                    html += '<button type="button" class="btn-request-track" data-req="' + escapeHtml(r.requestId) + '">Track Request</button>';
+                }
             }
             html += '</div>';
             html += '</div>';
@@ -2349,6 +2404,30 @@
         if (el) el.addEventListener('click', onPortalCardClick);
     });
     function onPortalCardClick(e) {
+        // History Mark-as-Collected: funnels through the SAME 'done' action and
+        // the SAME disable-on-click behavior as the notification detail. Checked
+        // first so the data-req handler below does not short-circuit it (this
+        // button carries data-done-cr, not data-req).
+        var doneBtn = e.target.closest('button[data-done-cr]');
+        if (doneBtn) {
+            if (doneBtn.disabled) return;
+            var crId = doneBtn.getAttribute('data-done-cr');
+            doneBtn.disabled = true;
+            doneBtn.textContent = 'Marking...';
+            collectFetch('POST', { collectRequestId: crId }, 'done').then(function() {
+                // Re-render History (posted card becomes disabled "Collected")
+                // + analytics, and refresh lifecycle data / notif badge.
+                loadPortalHistory();
+                loadLifecycleRequests();
+                refreshNotifBadge();
+            }).catch(function(err) {
+                doneBtn.disabled = false;
+                doneBtn.textContent = 'Mark as Collected';
+                doneBtn.insertAdjacentHTML('afterend',
+                    '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>');
+            });
+            return;
+        }
         var btn = e.target.closest('button[data-req]');
         if (!btn) return;
         var r = findRequest(btn.getAttribute('data-req'));
@@ -2719,8 +2798,16 @@
             }
             html += '<p class="unlock-note">Address &amp; contact unlocked. You can now chat.</p>';
             html += '</div>';
-            actions = '<button type="button" class="btn-profile-primary" data-chat="' + crId + '"><i class="fa-solid fa-comments"></i> Open Chat</button>' +
-                      '<button type="button" class="btn-profile-secondary" data-done="' + crId + '"><i class="fa-solid fa-flag-checkered"></i> Mark as Collected</button>';
+            actions = '<button type="button" class="btn-profile-primary" data-chat="' + crId + '"><i class="fa-solid fa-comments"></i> Open Chat</button>';
+            // Mark as Collected is keyed off the CURRENT collect-request status:
+            // active only while 'confirmed'; a DISABLED "Collected" button once
+            // 'collected'; nothing while 'disputed'. This keeps the same
+            // disable-when-done treatment used in History (see renderPortalCards).
+            if (cr.status === 'confirmed') {
+                actions += '<button type="button" class="btn-profile-secondary" data-done="' + crId + '"><i class="fa-solid fa-flag-checkered"></i> Mark as Collected</button>';
+            } else if (cr.status === 'collected') {
+                actions += '<button type="button" class="btn-profile-secondary" data-done="' + crId + '" disabled><i class="fa-solid fa-flag-checkered"></i> Collected</button>';
+            }
             // Report a problem is available while confirmed/collected.
             if (cr.status === 'confirmed' || cr.status === 'collected') {
                 actions += '<button type="button" class="btn-profile-secondary" data-dispute="' + crId + '"><i class="fa-solid fa-triangle-exclamation"></i> Report a problem</button>';
@@ -2804,6 +2891,7 @@
     function wireNotifDetailActions() {
         function act(suffix, id, btn) {
             btn.disabled = true;
+            if (suffix === 'done') btn.textContent = 'Marking...';
             collectFetch('POST', { collectRequestId: id }, suffix).then(function() {
                 // Refresh everything affected.
                 loadNotifications();

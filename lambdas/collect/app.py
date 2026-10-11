@@ -1041,7 +1041,13 @@ def mark_done(claims, body):
     # 'confirmed' right up to completion ('collecting' lives on the waste item).
     if claims["sub"] not in (cr.get("ownerId"), cr.get("collectorId")):
         return json_response({"error": "Not authorized"}, status=403)
-    if cr.get("status") not in ("confirmed",):
+    status = cr.get("status")
+    if status == "collected":
+        # Idempotent: desired end state already reached. No-op: do not re-write
+        # the collect-request or waste item, and do not re-notify (no duplicate
+        # "Collection completed"). Return the current view as success.
+        return _creq_view(cr)
+    if status != "confirmed":
         return json_response({"error": "Request is not confirmed yet"}, status=400)
 
     creq_table.update_item(

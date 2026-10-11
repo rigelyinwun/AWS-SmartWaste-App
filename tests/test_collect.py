@@ -654,3 +654,104 @@ def test_unlock_and_chat_statuses_are_identical_and_exclude_collecting():
     assert "collecting" not in app.UNLOCK_STATUSES
     assert "requested" not in app.UNLOCK_STATUSES
     assert "accepted" not in app.UNLOCK_STATUSES
+
+
+# ===================== mark_done idempotency / guard (point 2) ================
+# mark_done touches creq_table/table (DynamoDB) and notify. We fake those module
+# globals so the pure guard + transition logic runs offline, and count how many
+# update_item / notify calls happen for each starting status.
+
+class _RecordTable:
+    """Records update_item calls so a transition can be asserted/counted."""
+    def __init__(self):
+        self.updates = []
+
+    def update_item(self, **k):
+        self.updates.append(k)
+
+
+def _setup_mark_done(monkeypatch, cr):
+    """Wire mark_done's module globals to fakes around a crafted collect-request.
+    Returns (creq_fake, waste_fake, notify_calls)."""
+    creq = _RecordTable()
+    waste = _RecordTable()
+    notify_calls = []
+    monkeypatch.setattr(app, "creq_table", creq)
+    monkeypatch.setattr(app, "table", waste)
+    monkeypatch.setattr(app, "_get_creq", lambda cid: cr)
+    monkeypatch.setattr(app, "notify",
+                        lambda *a, **k: notify_calls.append(a))
+    monkeypatch.setattr(app, "time",
+                        types_simplenamespace_time())
+    return creq, waste, notify_calls
+
+
+def types_simplenamespace_time():
+    import types as _t
+    return _t.SimpleNamespace(time=lambda: 1700000000)
+
+
+def _confirmed_cr():
+    return {"collectRequestId": "c1", "wasteId": "w1", "ownerId": "owner-1",
+            "collectorId": "col-1", "status": "confirmed", "wasteType": "Bottles"}
+
+
+def test_mark_done_confirmed_transitions_and_notifies(monkeypatch):
+    cr = _confirmed_cr()
+    creq, waste, notify_calls = _setup_mark_done(monkeypatch, cr)
+    resp = app.mark_done({"sub": "owner-1"}, {"collectRequestId": "c1"})
+    # Success returns a _creq_view dict (not a Response), now 'collected'.
+    assert isinstance(resp, dict)
+    assert resp["status"] == "collected"
+    # Collect-request + waste item were each updated once.
+    assert len(creq.updates) == 1
+    assert len(waste.updates) == 1
+    # notify fired for BOTH owner and collector.
+    assert len(notify_calls) == 2
+
+
+def test_mark_done_already_collected_is_idempotent_noop(monkeypatch):
+    cr = _confirmed_cr()
+    cr["status"] = "collected"
+    creq, waste, notify_calls = _setup_mark_done(monkeypatch, cr)
+    resp = app.mark_done({"sub": "col-1"}, {"collectRequestId": "c1"})
+    # Returns the current view as success (NOT a 400 Response).
+    assert isinstance(resp, dict)
+    assert resp["status"] == "collected"
+    # No re-write and no duplicate "Collection completed" notification.
+    assert creq.updates == []
+    assert waste.updates == []
+    assert notify_calls == []
+
+
+def test_mark_done_wrong_state_is_400(monkeypatch):
+    for bad in ("requested", "accepted", "cancelled", "rejected", "closed"):
+        cr = _confirmed_cr()
+        cr["status"] = bad
+        creq, waste, notify_calls = _setup_mark_done(monkeypatch, cr)
+        resp = app.mark_done({"sub": "owner-1"}, {"collectRequestId": "c1"})
+        assert _status_of(resp) == 400
+        # No state change on a wrong-state call.
+        assert creq.updates == []
+        assert waste.updates == []
+        assert notify_calls == []
+
+
+def test_mark_done_disputed_is_400_not_noop(monkeypatch):
+    # 'disputed' is terminal-but-not-collected: it must still 400, never silently
+    # succeed, and never transition or notify.
+    cr = _confirmed_cr()
+    cr["status"] = "disputed"
+    creq, waste, notify_calls = _setup_mark_done(monkeypatch, cr)
+    resp = app.mark_done({"sub": "owner-1"}, {"collectRequestId": "c1"})
+    assert _status_of(resp) == 400
+    assert creq.updates == [] and waste.updates == [] and notify_calls == []
+
+
+def test_mark_done_rejects_non_party_403(monkeypatch):
+    # Authorization UNCHANGED: only owner or collector may mark done.
+    cr = _confirmed_cr()
+    creq, waste, notify_calls = _setup_mark_done(monkeypatch, cr)
+    resp = app.mark_done({"sub": "stranger"}, {"collectRequestId": "c1"})
+    assert _status_of(resp) == 403
+    assert creq.updates == [] and waste.updates == [] and notify_calls == []
