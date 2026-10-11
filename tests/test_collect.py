@@ -60,8 +60,10 @@ def test_creq_view_locked_when_requested():
 
 
 def test_creq_view_unlocks_when_approved():
+    # Unlock point moved from 'approved' to 'confirmed' (first UNLOCK_STATUSES
+    # state) by the Phase 1 disintermediation state machine.
     cr = {"collectRequestId": "c1", "wasteId": "w1", "ownerId": "o",
-          "collectorId": "k", "status": "approved"}
+          "collectorId": "k", "status": "confirmed"}
     waste = {"fullAddress": "123 St", "phone": "+60", "pickupTime": "9am", "notes": "lobby"}
     v = app._creq_view(cr, waste)
     assert v["unlocked"] is True
