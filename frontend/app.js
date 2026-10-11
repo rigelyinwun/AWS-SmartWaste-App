@@ -18,6 +18,13 @@
     // signup/confirm/login/logout plus session accessors used across the app.
     var _userPool = null;
 
+    // Per-tab auth: store the Cognito session in sessionStorage (scoped to a
+    // single tab) instead of the SDK default localStorage (shared across all
+    // tabs of the same origin). This lets two tabs stay signed in as different
+    // accounts; the trade-off is a session does not survive closing the tab.
+    var AUTH_STORAGE = (typeof window !== 'undefined' && window.sessionStorage)
+        ? window.sessionStorage : undefined;
+
     function userPool() {
         if (_userPool) return _userPool;
         if (typeof AmazonCognitoIdentity === 'undefined') return null;
@@ -25,12 +32,15 @@
         _userPool = new AmazonCognitoIdentity.CognitoUserPool({
             UserPoolId: COGNITO_CONFIG.userPoolId,
             ClientId: COGNITO_CONFIG.clientId,
+            Storage: AUTH_STORAGE,
         });
         return _userPool;
     }
 
     function cognitoUser(email) {
-        return new AmazonCognitoIdentity.CognitoUser({ Username: email, Pool: userPool() });
+        return new AmazonCognitoIdentity.CognitoUser({
+            Username: email, Pool: userPool(), Storage: AUTH_STORAGE,
+        });
     }
 
     var Auth = {
@@ -123,13 +133,16 @@
                              groups: payload['cognito:groups'] || [] };
                 }
             } catch (e) { /* fall through to cached token */ }
-            // Fallback: decode the ID token the SDK cached in localStorage
+            // Fallback: decode the ID token the SDK cached in sessionStorage
             // (populated on a persisted session before getSession() runs).
+            // Must read the SAME store the pool is configured with (AUTH_STORAGE),
+            // otherwise a different account's token could be read across tabs.
             try {
+                var store = AUTH_STORAGE || window.localStorage;
                 var prefix = 'CognitoIdentityServiceProvider.' + COGNITO_CONFIG.clientId + '.';
-                var lastUser = localStorage.getItem(prefix + 'LastAuthUser');
+                var lastUser = store.getItem(prefix + 'LastAuthUser');
                 if (!lastUser) return null;
-                var idToken = localStorage.getItem(prefix + lastUser + '.idToken');
+                var idToken = store.getItem(prefix + lastUser + '.idToken');
                 if (!idToken) return null;
                 var claims = JSON.parse(atob(idToken.split('.')[1]));
                 return { email: claims.email, name: claims.name, sub: claims.sub,
@@ -1169,7 +1182,7 @@
 
     var _routerReady = false;
 
-    // Initialize header to reflect any persisted session (SDK uses localStorage).
+    // Initialize header to reflect any persisted session (per-tab sessionStorage).
     onAuthChanged();
 
     // ===================== Hash router =====================
