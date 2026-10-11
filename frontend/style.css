@@ -90,6 +90,8 @@ header::after {
 .header-brand {
     text-align: left;
     flex-shrink: 0;
+    text-decoration: none;
+    color: inherit;
 }
 
 .header-brand h1 {
@@ -1357,6 +1359,11 @@ footer {
     font-size: 0.85rem;
 }
 
+/* Footer belongs to the home view only — hide it on routed sub-pages. */
+body.on-subpage footer {
+    display: none;
+}
+
 /* Invalid input popup modal */
 .invalid-overlay {
     display: none;
@@ -1977,35 +1984,48 @@ footer {
     overflow: hidden;
 }
 
-/* Sticky page top bar with back-to-home arrow + title */
-.page-topbar {
-    position: sticky;
-    top: 0;
-    z-index: 10;
+/* Page top bar with back-to-home arrow + title — plain (no green banner).
+   Scoped to .app-page and after .profile-head so it overrides the green head. */
+.app-page .profile-head.page-topbar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem 0.5rem;
+    background: transparent;
+    color: var(--text);
+}
+
+.app-page .profile-head.page-topbar h2 {
+    font-family: var(--font-display);
+    font-size: 1.35rem;
+    color: var(--primary-dark);
+    margin: 0;
 }
 
 .page-back {
-    background: rgba(255, 255, 255, 0.18);
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    color: #fff;
-    width: 38px;
-    height: 38px;
-    border-radius: 10px;
+    background: #fff;
+    border: 1px solid var(--border);
+    color: var(--primary-dark);
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
     font-size: 1rem;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    box-shadow: var(--shadow);
     transition: background 0.2s, transform 0.1s;
 }
 
 .page-back:hover {
-    background: rgba(255, 255, 255, 0.32);
+    background: #f1f8f2;
+    border-color: var(--primary);
     transform: translateX(-2px);
 }
 
-/* === Profile / page head bar === */
+/* === Profile / modal head bar (still used elsewhere) === */
 .profile-head {
     display: flex;
     align-items: center;

@@ -1147,6 +1147,8 @@
         for (var i = 0; i < pages.length; i++) {
             pages[i].hidden = (pages[i].id !== viewId);
         }
+        // Hide the home footer when on a sub-page.
+        document.body.classList.toggle('on-subpage', viewId !== 'viewHome');
         _currentView = viewId;
         window.scrollTo(0, 0);
     }
@@ -1780,15 +1782,52 @@
         return null;
     }
 
-    document.getElementById('portalListCards').addEventListener('click', onPortalCardClick);
-    document.getElementById('portalHistoryCards').addEventListener('click', onPortalCardClick);
+    ['portalListCards', 'historyPostedCards', 'historyCollectedCards'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('click', onPortalCardClick);
+    });
     function onPortalCardClick(e) {
         var btn = e.target.closest('button[data-req]');
         if (!btn) return;
         var r = findRequest(btn.getAttribute('data-req'));
         if (!r) return;
-        if (btn.classList.contains('btn-request-view')) openReqDetail(r);
-        else if (btn.classList.contains('btn-request-track')) openReqDetail(r);
+        if (btn.classList.contains('btn-request-view')) {
+            openReqDetail(r);
+        } else if (btn.classList.contains('btn-request-track')) {
+            // Track -> go to Notifications. For the owner's own item, open the
+            // pending collect-request so they can approve/reject it there.
+            var mine = Auth.profile() && Auth.profile().sub === r.ownerId;
+            if (mine) {
+                navigate('notifications');
+                openRequestInNotifications(r.requestId);
+            } else {
+                openReqDetail(r);
+            }
+        }
+    }
+
+    // After navigating to notifications, find the pending collect-request for
+    // the given waste item and show its detail (approve/reject) panel.
+    function openRequestInNotifications(wasteId) {
+        var attempts = 0;
+        (function tryShow() {
+            attempts++;
+            var all = lifecycleRequests.incoming.concat(lifecycleRequests.outgoing);
+            var match = null;
+            for (var i = 0; i < all.length; i++) {
+                if (all[i].wasteId === wasteId) {
+                    // Prefer a still-actionable (requested) one.
+                    if (all[i].status === 'requested') { match = all[i]; break; }
+                    if (!match) match = all[i];
+                }
+            }
+            if (match) {
+                // Build a synthetic notification-like detail from the collect request.
+                showNotifDetailForCollectRequest(match);
+            } else if (attempts < 15) {
+                setTimeout(tryShow, 200);  // wait for loadLifecycleRequests()
+            }
+        })();
     }
 
     // ===================== Request detail + lifecycle actions =====================
@@ -1948,19 +1987,25 @@
     function showNotifDetail(n) {
         var meta = n.meta || {};
         var cr = meta.collectRequestId ? findCollectRequest(meta.collectRequestId) : null;
+        showNotifDetailForCollectRequest(cr, n.title || n.type || '');
+    }
 
+    // Render the detail panel for a collect request (owner: approve/reject;
+    // collector: unlocked info + chat/done). Shared by notifications + Track.
+    function showNotifDetailForCollectRequest(cr, typeLabel) {
         var html = '';
         html += '<div class="report-summary">';
-        html += detailRow('Type', n.title || n.type || '');
+        if (typeLabel) html += detailRow('Type', typeLabel);
         if (cr) {
             html += detailRow('Item', cr.wasteType || 'Waste item');
             html += detailRow('Status', cr.status || '');
             if (cr.role === 'owner') html += detailRow('Collector', cr.collectorName || '');
             else html += detailRow('Owner', cr.ownerName || '');
+        } else {
+            html += '<div class="placeholder-text">No pending request for this item yet.</div>';
         }
         html += '</div>';
 
-        // Unlocked info (collector, approved) or owner approve/reject actions.
         var actions = '';
         if (cr && cr.role === 'owner' && cr.status === 'requested') {
             actions = '<button type="button" class="btn-profile-primary" data-approve="' + escapeHtml(cr.collectRequestId) + '"><i class="fa-solid fa-check"></i> Approve</button>' +
@@ -2443,7 +2488,10 @@
                 for (var q = 0; q < queries.length; q++) {
                     var qq = queries[q];
                     if (!qq.url || !/^https?:\/\//i.test(qq.url)) continue;
-                    html += '<a class="trading-chip" href="' + encodeURI(qq.url) +
+                    // qq.url is already a valid, fully-encoded URL from the
+                    // Lambda — only HTML-escape it for the attribute (do NOT
+                    // re-encode, or %20 becomes %2520).
+                    html += '<a class="trading-chip" href="' + escapeHtml(qq.url) +
                         '" target="_blank" rel="noopener noreferrer" ' +
                         'title="Search ' + escapeHtml(qq.term || '') + '">' +
                         '<span class="chip-lang">' + escapeHtml(qq.lang || '') + '</span>' +
@@ -2462,7 +2510,15 @@
     function renderFacilities(data) {
         var listEl = document.getElementById('facilitiesList');
         var subheading = document.getElementById('facilitiesSubheading');
-        renderTradingPlatforms(data && data.trading_platforms);
+        // Trading platforms are a non-critical add-on — never let a problem there
+        // break the facilities map/list.
+        try {
+            renderTradingPlatforms(data && data.trading_platforms);
+        } catch (e) {
+            console.error('Trading platforms render failed:', e);
+            var tp = document.getElementById('tradingPlatforms');
+            if (tp) tp.hidden = true;
+        }
 
         var center = (data && data.center) || { lat: 3.139, lng: 101.6869, label: 'Malaysia' };
         var facilities = (data && Array.isArray(data.facilities)) ? data.facilities : [];
