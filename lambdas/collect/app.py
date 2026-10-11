@@ -183,9 +183,7 @@ def list_public(claims):
     except Exception as e:
         logger.error("list_public query error: %s", str(e))
     my_id = claims["sub"]
-    # Public list excludes the viewer's own open reports (those live in "mine").
-    out = [public_view(it, owner=(it.get("ownerId") == my_id))
-           for it in items]
+    out = [public_view(it, owner=(it.get("ownerId") == my_id)) for it in items]
     return {"requests": out}
 
 

@@ -1989,17 +1989,21 @@ body.on-subpage footer {
 .app-page .profile-head.page-topbar {
     display: flex;
     align-items: center;
-    gap: 1rem;
+    justify-content: flex-start;
+    gap: 0.9rem;
     padding: 1.25rem 1.5rem 0.5rem;
     background: transparent;
     color: var(--text);
 }
 
+/* Title sits immediately to the right of the back arrow (left-aligned). */
 .app-page .profile-head.page-topbar h2 {
     font-family: var(--font-display);
     font-size: 1.35rem;
     color: var(--primary-dark);
     margin: 0;
+    flex: 0 0 auto;
+    text-align: left;
 }
 
 .page-back {
@@ -2428,15 +2432,19 @@ body.on-subpage footer {
     gap: 1rem;
     font-size: 0.85rem;
     padding: 0.2rem 0;
+    align-items: flex-start;
 }
 
 .report-summary-row span {
     color: var(--text-muted);
+    flex-shrink: 0;
 }
 
 .report-summary-row strong {
     color: var(--primary-dark);
     text-align: right;
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .auth-form textarea {
@@ -2664,6 +2672,21 @@ body.on-subpage footer {
     grid-template-columns: 1fr 1fr;
     gap: 1.25rem;
     padding: 1.25rem;
+    align-items: start;
+}
+
+/* Grid children must be allowed to shrink, or a long line in one column
+   squeezes the other to one-word-per-line and clips content. */
+.notif-feed-col,
+.notif-detail-col {
+    min-width: 0;
+}
+
+.notif-item-body,
+.notif-item-title,
+.notif-item-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .notif-col-title {
