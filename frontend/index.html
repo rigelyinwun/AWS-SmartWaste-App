@@ -34,6 +34,9 @@
                 <i class="fa-solid fa-bell"></i>
                 <span class="icon-count-badge" id="notifBadge" hidden>0</span>
             </button>
+            <button type="button" class="header-icon-btn" id="adminNavBtn" aria-label="Admin" title="Admin" hidden>
+                <i class="fa-solid fa-user-shield"></i>
+            </button>
             <button type="button" class="btn-auth btn-login" id="loginBtn">Login</button>
             <button type="button" class="btn-auth btn-signup" id="signupBtn">Sign Up</button>
         </nav>
@@ -274,6 +277,18 @@ What would you like to know about waste disposal?</div>
                 <div class="auth-field">
                     <label for="rfArea">Area / Neighborhood (public)</label>
                     <input type="text" id="rfArea" placeholder="e.g. Cyberjaya, Selangor">
+                </div>
+                <div class="auth-field">
+                    <label for="rfMaxPrice">Maximum price you'll pay (optional)</label>
+                    <input type="number" id="rfMaxPrice" step="0.01" min="0" placeholder="e.g. 20.00">
+                </div>
+                <div class="auth-field">
+                    <label for="rfCurrency">Currency</label>
+                    <select id="rfCurrency">
+                        <option value="MYR" selected>MYR</option>
+                        <option value="SGD">SGD</option>
+                        <option value="USD">USD</option>
+                    </select>
                 </div>
                 <div class="auth-field">
                     <label for="rfPickup">Preferred Pickup Time</label>
@@ -581,6 +596,72 @@ What would you like to know about waste disposal?</div>
                     </div>
                 </section>
 
+                <!-- Collector account -->
+                <section class="profile-card" id="collectorCard">
+                    <h3 class="profile-section-title">Collector account</h3>
+                    <div id="collectorStatusBox">
+                        <p class="placeholder-text">Loading...</p>
+                    </div>
+                    <button type="button" class="btn-profile-primary" id="becomeCollectorBtn" hidden>
+                        <i class="fa-solid fa-truck"></i> Become a collector
+                    </button>
+
+                    <!-- Apply/submit form (hidden until "Become a collector") -->
+                    <div id="collectorForm" hidden>
+                        <div class="profile-field">
+                            <label for="colBusinessName">Business name</label>
+                            <input type="text" id="colBusinessName">
+                        </div>
+                        <div class="profile-field">
+                            <label for="colRegistrationNumber">Registration number</label>
+                            <input type="text" id="colRegistrationNumber">
+                        </div>
+                        <div class="profile-field">
+                            <label for="colLicense">Waste-carrier license</label>
+                            <input type="text" id="colLicense">
+                        </div>
+                        <div class="profile-field">
+                            <label for="colServiceAreas">Service areas (comma-separated)</label>
+                            <input type="text" id="colServiceAreas" placeholder="e.g. Cyberjaya, Putrajaya">
+                        </div>
+                        <div class="profile-field">
+                            <label for="colWasteCategories">Waste categories (comma-separated)</label>
+                            <input type="text" id="colWasteCategories" placeholder="e.g. Plastic, E-waste">
+                        </div>
+                        <div class="profile-field">
+                            <label for="colContactPhone">Contact phone</label>
+                            <input type="tel" id="colContactPhone" placeholder="+60...">
+                        </div>
+                        <div class="profile-field">
+                            <label for="colContactEmail">Contact email</label>
+                            <input type="email" id="colContactEmail">
+                        </div>
+
+                        <h4 class="profile-section-title">Verification documents</h4>
+                        <div class="profile-field">
+                            <label for="colDocRegistration">Registration document</label>
+                            <input type="file" id="colDocRegistration" accept="image/png,image/jpeg,application/pdf">
+                            <small class="collector-doc-status" id="colDocRegistrationStatus"></small>
+                        </div>
+                        <div class="profile-field">
+                            <label for="colDocLicense">License document</label>
+                            <input type="file" id="colDocLicense" accept="image/png,image/jpeg,application/pdf">
+                            <small class="collector-doc-status" id="colDocLicenseStatus"></small>
+                        </div>
+                        <div class="profile-field">
+                            <label for="colDocInsurance">Insurance document</label>
+                            <input type="file" id="colDocInsurance" accept="image/png,image/jpeg,application/pdf">
+                            <small class="collector-doc-status" id="colDocInsuranceStatus"></small>
+                        </div>
+
+                        <p class="profile-msg" id="collectorFormMsg" hidden></p>
+                        <div class="profile-edit-actions">
+                            <button type="button" class="btn-profile-secondary" id="collectorCancelBtn">Cancel</button>
+                            <button type="button" class="btn-profile-primary" id="collectorSubmitBtn">Submit application</button>
+                        </div>
+                    </div>
+                </section>
+
                 <!-- Rate & Feedback -->
                 <section class="profile-card">
                     <h3 class="profile-section-title">Rate &amp; Feedback</h3>
@@ -639,6 +720,34 @@ What would you like to know about waste disposal?</div>
             <div class="delete-confirm-actions">
                 <button type="button" class="btn-profile-secondary" id="deleteCancelBtn">Cancel</button>
                 <button type="button" class="btn-profile-delete" id="deleteConfirmBtn">Yes, delete</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin: collector verification queue (page) -->
+    <div class="app-page" id="adminOverlay" hidden>
+        <div class="profile-sheet" aria-labelledby="adminPageTitle">
+            <header class="profile-head page-topbar">
+                <button type="button" class="page-back" data-home aria-label="Back to home">
+                    <i class="fa-solid fa-arrow-left"></i>
+                </button>
+                <h2 id="adminPageTitle">Collector verification</h2>
+            </header>
+            <div class="profile-body">
+                <section class="profile-card">
+                    <div class="admin-filter">
+                        <label for="adminStatusFilter">Status</label>
+                        <select id="adminStatusFilter">
+                            <option value="pending" selected>Pending</option>
+                            <option value="approved">Approved</option>
+                            <option value="rejected">Rejected</option>
+                            <option value="suspended">Suspended</option>
+                        </select>
+                    </div>
+                    <div id="adminQueueCards">
+                        <div class="placeholder-text">Loading...</div>
+                    </div>
+                </section>
             </div>
         </div>
     </div>

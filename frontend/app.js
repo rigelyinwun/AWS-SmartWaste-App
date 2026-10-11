@@ -119,7 +119,8 @@
                 var session = user.signInUserSession;
                 if (session) {
                     var payload = session.getIdToken().decodePayload();
-                    return { email: payload.email, name: payload.name, sub: payload.sub };
+                    return { email: payload.email, name: payload.name, sub: payload.sub,
+                             groups: payload['cognito:groups'] || [] };
                 }
             } catch (e) { /* fall through to cached token */ }
             // Fallback: decode the ID token the SDK cached in localStorage
@@ -131,7 +132,8 @@
                 var idToken = localStorage.getItem(prefix + lastUser + '.idToken');
                 if (!idToken) return null;
                 var claims = JSON.parse(atob(idToken.split('.')[1]));
-                return { email: claims.email, name: claims.name, sub: claims.sub };
+                return { email: claims.email, name: claims.name, sub: claims.sub,
+                         groups: claims['cognito:groups'] || [] };
             } catch (e2) {
                 return null;
             }
@@ -1105,6 +1107,16 @@
             if (logoutBtn) logoutBtn.hidden = true;
         }
 
+        // Show the Admin nav only when the ID token's cognito:groups contains
+        // 'admins'. This is a convenience gate — the server re-verifies via
+        // _is_admin on every /admin call.
+        var adminNavBtn = document.getElementById('adminNavBtn');
+        if (adminNavBtn) {
+            var isAdmin = loggedIn && profile &&
+                (profile.groups || []).indexOf('admins') !== -1;
+            adminNavBtn.hidden = !isAdmin;
+        }
+
         // Refresh the notification badge whenever auth state changes.
         if (typeof refreshNotifBadge === 'function') refreshNotifBadge();
         // Re-resolve the current route so gated pages redirect on logout / allow on login.
@@ -1158,6 +1170,7 @@
         'chat': { view: 'chatPageOverlay', gated: true, enter: function(arg) { onEnterChat(arg); } },
         'notifications': { view: 'notifOverlay', gated: true, enter: function() { onEnterNotifications(); } },
         'portal': { view: 'portalOverlay', gated: true, enter: function(arg) { onEnterPortal(arg); } },
+        'admin': { view: 'adminOverlay', gated: true, enter: function() { onEnterAdmin(); } },
     };
 
     function parseHash() {
@@ -1271,6 +1284,7 @@
         showProfileView();
         loadProfile();
         if (typeof updatePushUI === 'function') updatePushUI();
+        if (typeof loadCollectorStatus === 'function') loadCollectorStatus();
     }
 
     function showProfileView() {
@@ -1449,6 +1463,145 @@
         });
     });
 
+    // ===================== Collector account (Profile) =====================
+    var COLLECTOR_DOCS = [
+        { type: 'registration', input: 'colDocRegistration', status: 'colDocRegistrationStatus' },
+        { type: 'license', input: 'colDocLicense', status: 'colDocLicenseStatus' },
+        { type: 'insurance', input: 'colDocInsurance', status: 'colDocInsuranceStatus' },
+    ];
+    var COLLECTOR_STATUS_LABELS = {
+        none: 'Not applied', draft: 'Draft (not submitted)', pending: 'Pending review',
+        approved: 'Approved', rejected: 'Rejected', suspended: 'Suspended',
+    };
+
+    function loadCollectorStatus() {
+        var box = document.getElementById('collectorStatusBox');
+        var becomeBtn = document.getElementById('becomeCollectorBtn');
+        var form = document.getElementById('collectorForm');
+        if (!box || !becomeBtn || !form) return;
+        if (!collectConfigured()) { box.innerHTML = ''; return; }
+
+        box.innerHTML = '<p class="placeholder-text">Loading...</p>';
+        becomeBtn.hidden = true;
+        form.hidden = true;
+
+        collectFetch('GET', null, '/collector/me').then(function(me) {
+            var status = (me && me.status) || 'none';
+            var label = COLLECTOR_STATUS_LABELS[status] || status;
+            var html = '<div class="report-summary-row"><span>Status</span>' +
+                '<strong>' + escapeHtml(label) + '</strong></div>';
+            if (status === 'rejected' && me.rejectionReason) {
+                html += '<div class="report-summary-row"><span>Reason</span><strong>' +
+                    escapeHtml(me.rejectionReason) + '</strong></div>';
+            }
+            box.innerHTML = '<div class="report-summary">' + html + '</div>';
+
+            // 'none' and 'draft' can apply/submit; approved/pending/rejected/
+            // suspended just show status (re-apply flows are a later phase).
+            if (status === 'none' || status === 'draft') {
+                becomeBtn.hidden = false;
+            }
+            // Prefill the form from an existing draft so a re-open keeps data.
+            if (me && status !== 'none') prefillCollectorForm(me);
+        }).catch(function() {
+            box.innerHTML = '';
+        });
+    }
+
+    function prefillCollectorForm(me) {
+        setVal('colBusinessName', me.businessName);
+        setVal('colRegistrationNumber', me.registrationNumber);
+        setVal('colLicense', me.wasteCarrierLicense);
+        setVal('colServiceAreas', (me.serviceAreas || []).join(', '));
+        setVal('colWasteCategories', (me.wasteCategories || []).join(', '));
+        setVal('colContactPhone', me.contactPhone);
+        setVal('colContactEmail', me.contactEmail);
+    }
+
+    function setVal(id, v) {
+        var el = document.getElementById(id);
+        if (el) el.value = v || '';
+    }
+
+    (function wireCollectorForm() {
+        var becomeBtn = document.getElementById('becomeCollectorBtn');
+        var form = document.getElementById('collectorForm');
+        var cancelBtn = document.getElementById('collectorCancelBtn');
+        var submitBtn = document.getElementById('collectorSubmitBtn');
+        if (!becomeBtn || !form) return;
+
+        becomeBtn.addEventListener('click', function() {
+            becomeBtn.hidden = true;
+            form.hidden = false;
+            hideEl('collectorFormMsg');
+        });
+        if (cancelBtn) cancelBtn.addEventListener('click', function() {
+            form.hidden = true;
+            loadCollectorStatus();
+        });
+
+        function splitList(id) {
+            return (document.getElementById(id).value || '').split(',')
+                .map(function(s) { return s.trim(); })
+                .filter(function(s) { return s; });
+        }
+
+        // Upload one document via presigned PUT. The signed ContentType must
+        // equal the browser PUT Content-Type, and the PUT carries NO bearer.
+        function uploadDoc(cfg) {
+            var input = document.getElementById(cfg.input);
+            var statusEl = document.getElementById(cfg.status);
+            if (!input || !input.files || !input.files[0]) return Promise.resolve();
+            var file = input.files[0];
+            if (statusEl) statusEl.textContent = 'Uploading...';
+            return collectFetch('POST', { docType: cfg.type, contentType: file.type }, '/collector/upload-url')
+                .then(function(res) {
+                    return fetch(res.url, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': file.type },
+                        body: file,
+                    });
+                }).then(function(putResp) {
+                    if (!putResp.ok) throw new Error('Upload failed (' + putResp.status + ')');
+                    if (statusEl) statusEl.textContent = 'Uploaded.';
+                }).catch(function(err) {
+                    if (statusEl) statusEl.textContent = 'Upload failed.';
+                    throw err;
+                });
+        }
+
+        if (submitBtn) submitBtn.addEventListener('click', function() {
+            hideEl('collectorFormMsg');
+            var apply = {
+                businessName: document.getElementById('colBusinessName').value.trim(),
+                registrationNumber: document.getElementById('colRegistrationNumber').value.trim(),
+                wasteCarrierLicense: document.getElementById('colLicense').value.trim(),
+                serviceAreas: splitList('colServiceAreas'),
+                wasteCategories: splitList('colWasteCategories'),
+                contactPhone: document.getElementById('colContactPhone').value.trim(),
+                contactEmail: document.getElementById('colContactEmail').value.trim(),
+            };
+            submitBtn.disabled = true;
+
+            // Upload any selected documents first, then apply -> submit.
+            var uploads = COLLECTOR_DOCS.map(uploadDoc);
+            Promise.all(uploads).then(function() {
+                return collectFetch('POST', apply, '/collector/apply');
+            }).then(function() {
+                return collectFetch('POST', null, '/collector/submit');
+            }).then(function(res) {
+                submitBtn.disabled = false;
+                form.hidden = true;
+                showMsg('collectorFormMsg', 'Application submitted. Status: ' +
+                    ((res && res.status) || 'pending'), false);
+                loadCollectorStatus();
+            }).catch(function(err) {
+                submitBtn.disabled = false;
+                showMsg('collectorFormMsg', err.message, true);
+            });
+        });
+    })();
+
     // ===================== Collect: report + portal =====================
     var allowCollectBtn = document.getElementById('allowCollectBtn');
     var reportOverlay = document.getElementById('reportOverlay');
@@ -1475,7 +1628,20 @@
             });
         }).then(function(resp) {
             if (resp.status === 401) throw new Error('Your session expired. Please log in again.');
-            if (!resp.ok) throw new Error('Request failed (' + resp.status + ')');
+            if (!resp.ok) {
+                // Surface the server's error text verbatim when present (e.g. the
+                // 400 validation / 409 'no longer available' messages); fall back
+                // to a generic line. Attach the HTTP status for callers to branch on.
+                return resp.text().then(function(text) {
+                    var msg = '';
+                    if (text) {
+                        try { msg = (JSON.parse(text).error) || ''; } catch (e) { msg = text; }
+                    }
+                    var err = new Error(msg || ('Request failed (' + resp.status + ')'));
+                    err.status = resp.status;
+                    throw err;
+                });
+            }
             return resp.json();
         });
     }
@@ -1619,6 +1785,8 @@
         document.getElementById('rfPhone').value = '';
         document.getElementById('rfAddress').value = '';
         document.getElementById('rfArea').value = locationInput.value.trim() || '';
+        document.getElementById('rfMaxPrice').value = '';
+        document.getElementById('rfCurrency').value = 'MYR';
         document.getElementById('rfPickup').value = '';
         document.getElementById('rfNotes').value = '';
         hideEl('reportError'); hideEl('reportSuccess');
@@ -1671,6 +1839,17 @@
             return;
         }
 
+        // Optional max price the owner is willing to pay for removal (Type B).
+        var maxPriceRaw = document.getElementById('rfMaxPrice').value.trim();
+        var maxPrice = null;
+        if (maxPriceRaw) {
+            maxPrice = parseFloat(maxPriceRaw);
+            if (isNaN(maxPrice) || maxPrice <= 0) {
+                showMsg('reportError', 'Maximum price must be a number greater than 0.', true);
+                return;
+            }
+        }
+
         var w = wasteSummaryFromAnalysis();
         var body = {
             wasteType: w.wasteType,
@@ -1683,10 +1862,14 @@
             area: document.getElementById('rfArea').value.trim(),
             pickupTime: document.getElementById('rfPickup').value.trim(),
             notes: document.getElementById('rfNotes').value.trim(),
+            // Type B: the owner pays a collector to remove the item.
+            priceType: 'user_pays',
+            currency: document.getElementById('rfCurrency').value,
             // Sent so the server can re-validate the image before listing.
             file_data: fileData,
             file_mime: fileMime,
         };
+        if (maxPrice !== null) body.maxPrice = maxPrice;
 
         reportSubmit.disabled = true;
         collectFetch('POST', body, 'report').then(function() {
@@ -1986,13 +2169,23 @@
 
     function statusBadge(status) {
         var s = (status || 'open').toLowerCase();
-        var label = { open: 'Pending', requested: 'Requested', collecting: 'Collecting',
-                      rejected: 'Rejected', collected: 'Collected', done: 'Collected' }[s] || s;
+        var label = { open: 'Pending', requested: 'Requested', accepted: 'Accepted',
+                      confirmed: 'Confirmed', collecting: 'Collecting',
+                      rejected: 'Rejected', collected: 'Collected', done: 'Collected',
+                      cancelled: 'Cancelled', closed: 'Not selected', disputed: 'Disputed' }[s] || s;
         return '<span class="status-badge status-' + s + '">' + escapeHtml(label) + '</span>';
     }
 
+    // fmtTime expects epoch SECONDS. New Phase-1 fields (confirmedAt/disputedAt/
+    // cancelledAt/verifiedAt, collector createdAt/updatedAt) are seconds. Any
+    // collect-request/message createdAt is microseconds — divide by 1e6 before
+    // passing it here. As a safety net, a microsecond-scale value (far beyond
+    // any plausible seconds epoch) is scaled down so it never renders as a
+    // year-50000+ date.
     function fmtTime(ts) {
         if (!ts) return '';
+        // Seconds epochs are ~1e9-1e10; microseconds are ~1e15. Guard the gap.
+        if (ts > 1e13) ts = ts / 1e6;
         try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return ''; }
     }
 
@@ -2104,8 +2297,9 @@
                 }
             }
             if (match) {
-                // Build a synthetic notification-like detail from the collect request.
-                showNotifDetailForCollectRequest(match);
+                // Multiple collectors may quote the same item — show them all so
+                // the owner can compare and pick one.
+                renderIncomingQuotesForWaste(wasteId);
             } else if (attempts < 15) {
                 setTimeout(tryShow, 200);  // wait for loadLifecycleRequests()
             }
@@ -2134,32 +2328,88 @@
         hideEl('reqDetailError'); hideEl('reqDetailSuccess');
 
         // Actions depend on viewer + status.
-        var actions = '';
-        if (!mine && (r.status === 'open' || r.status === 'requested')) {
-            actions = '<button type="button" class="btn-profile-primary" id="reqCollectBtn">Request to Collect</button>';
-        } else if (mine) {
-            actions = '<span class="req-detail-note">This is your listing. Manage requests in Notifications.</span>';
-        } else {
-            actions = '<span class="req-detail-note">This item is already ' + escapeHtml(r.status) + '.</span>';
-        }
-        reqDetailActions.innerHTML = actions;
-
-        var collectBtn = document.getElementById('reqCollectBtn');
-        if (collectBtn) {
-            collectBtn.addEventListener('click', function() {
-                collectBtn.disabled = true;
-                collectFetch('POST', { requestId: r.requestId }, 'request').then(function() {
-                    showMsg('reqDetailSuccess', 'Request sent! The owner will review it.', false);
-                    reqDetailActions.innerHTML = '';
-                    loadPortalList();
-                }).catch(function(err) {
-                    collectBtn.disabled = false;
-                    showMsg('reqDetailError', err.message, true);
-                });
+        if (mine) {
+            reqDetailActions.innerHTML =
+                '<span class="req-detail-note">This is your listing. Manage requests in Notifications.</span>';
+        } else if (r.status === 'open' || r.status === 'requested') {
+            // Collector action: submit a priced quote. Gate the amount form on
+            // /collector/me — only an approved collector sees it; everyone else
+            // sees the apply CTA. The server still re-checks on submit.
+            reqDetailActions.innerHTML =
+                '<span class="req-detail-note">Checking your collector status...</span>';
+            collectFetch('GET', null, '/collector/me').then(function(me) {
+                if (me && me.status === 'approved') {
+                    renderQuoteForm(r);
+                } else {
+                    reqDetailActions.innerHTML =
+                        '<span class="req-detail-note">You need to be a verified collector to quote — ' +
+                        'apply from your Profile.</span>' +
+                        '<button type="button" class="btn-profile-secondary" id="reqGotoProfileBtn">Go to Profile</button>';
+                    var gp = document.getElementById('reqGotoProfileBtn');
+                    if (gp) gp.addEventListener('click', function() {
+                        closeReqDetail();
+                        navigate('profile');
+                    });
+                }
+            }).catch(function() {
+                // If the status check fails, offer the apply CTA (safe default).
+                reqDetailActions.innerHTML =
+                    '<span class="req-detail-note">You need to be a verified collector to quote — ' +
+                    'apply from your Profile.</span>';
             });
+        } else {
+            reqDetailActions.innerHTML =
+                '<span class="req-detail-note">This item is already ' + escapeHtml(r.status) + '.</span>';
         }
 
         reqDetailOverlay.classList.add('show');
+    }
+
+    // Render the collector "Submit Quote" form inside the request-detail overlay.
+    function renderQuoteForm(r) {
+        var hint = '';
+        if (r.maxPrice) {
+            hint = '<p class="req-detail-note">Owner\'s max: ' + escapeHtml(String(r.maxPrice)) +
+                ' ' + escapeHtml(r.currency || 'MYR') + '</p>';
+        }
+        reqDetailActions.innerHTML =
+            hint +
+            '<div class="auth-field"><label for="quoteAmount">Your quote amount</label>' +
+            '<input type="number" id="quoteAmount" step="0.01" min="0" placeholder="e.g. 15.00"></div>' +
+            '<div class="auth-field"><label for="quoteMessage">Message (optional)</label>' +
+            '<textarea id="quoteMessage" rows="2" placeholder="Add a note for the owner"></textarea></div>' +
+            '<button type="button" class="btn-profile-primary" id="reqQuoteBtn">Submit Quote</button>';
+
+        var quoteBtn = document.getElementById('reqQuoteBtn');
+        if (quoteBtn) quoteBtn.addEventListener('click', function() {
+            hideEl('reqDetailError'); hideEl('reqDetailSuccess');
+            var amtRaw = document.getElementById('quoteAmount').value.trim();
+            var amt = parseFloat(amtRaw);
+            if (!amtRaw || isNaN(amt) || amt <= 0) {
+                showMsg('reqDetailError', 'Enter a quote amount greater than 0.', true);
+                return;
+            }
+            var body = {
+                wasteId: r.requestId,
+                quoteAmount: amt,
+                message: document.getElementById('quoteMessage').value.trim(),
+            };
+            quoteBtn.disabled = true;
+            collectFetch('POST', body, 'request').then(function() {
+                showMsg('reqDetailSuccess', 'Quote sent! The owner will review it.', false);
+                reqDetailActions.innerHTML = '';
+                loadPortalList();
+            }).catch(function(err) {
+                quoteBtn.disabled = false;
+                // 403 -> not a verified collector; 400/409 -> surface server text verbatim.
+                if (err.status === 403) {
+                    showMsg('reqDetailError',
+                        'You need to be a verified collector to quote — apply from your Profile.', true);
+                } else {
+                    showMsg('reqDetailError', err.message, true);
+                }
+            });
+        });
     }
 
     function detailRow(label, value) {
@@ -2272,6 +2522,54 @@
         showNotifDetailForCollectRequest(cr, n.title || n.type || '');
     }
 
+    // Owner view: list every incoming quote for one waste item so the owner can
+    // compare amounts and pick one. Cards are sorted cheapest-first. Actions are
+    // staged: requested->Accept, accepted->Confirm deal + Cancel, unlocked->View
+    // details, terminal (rejected/closed/cancelled)->status only.
+    function renderIncomingQuotesForWaste(wasteId) {
+        var quotes = lifecycleRequests.incoming.filter(function(cr) {
+            return cr.wasteId === wasteId && cr.role === 'owner';
+        });
+        quotes.sort(function(a, b) {
+            return (a.quoteAmount || 0) - (b.quoteAmount || 0);
+        });
+
+        if (!quotes.length) {
+            notifDetailEl.innerHTML = '<div class="placeholder-text">No quotes for this item yet.</div>';
+            return;
+        }
+
+        var html = '';
+        for (var i = 0; i < quotes.length; i++) {
+            var cr = quotes[i];
+            var crId = escapeHtml(cr.collectRequestId);
+            html += '<div class="report-summary quote-card">';
+            html += detailRow('Collector', cr.collectorName || 'Collector');
+            html += detailRow('Quote', (cr.quoteAmount != null ? cr.quoteAmount : '—') +
+                ' ' + (cr.currency || 'MYR'));
+            if (cr.maxPrice != null) html += detailRow('Your max', cr.maxPrice + ' ' + (cr.currency || 'MYR'));
+            if (cr.message) html += '<div class="report-summary-row"><span>Message</span><strong>' +
+                escapeHtml(cr.message) + '</strong></div>';
+            html += '<div class="report-summary-row"><span>Status</span>' + statusBadge(cr.status) + '</div>';
+
+            var actions = '';
+            if (cr.status === 'requested') {
+                actions = '<button type="button" class="btn-profile-primary" data-approve="' + crId + '"><i class="fa-solid fa-check"></i> Accept</button>';
+            } else if (cr.status === 'accepted') {
+                actions = '<button type="button" class="btn-profile-primary" data-confirm="' + crId + '"><i class="fa-solid fa-handshake"></i> Confirm deal</button>' +
+                          '<button type="button" class="btn-profile-secondary" data-cancel="' + crId + '"><i class="fa-solid fa-xmark"></i> Cancel</button>';
+            } else if (cr.unlocked === true) {
+                actions = '<button type="button" class="btn-profile-secondary" data-open="' + crId + '"><i class="fa-solid fa-eye"></i> View details</button>';
+            }
+            // Terminal (rejected/closed/cancelled/disputed): status only, no actions.
+            html += '<div class="notif-detail-actions">' + actions + '</div>';
+            html += '</div>';
+        }
+
+        notifDetailEl.innerHTML = html;
+        wireNotifDetailActions();
+    }
+
     // Render the detail panel for a collect request (owner: approve/reject;
     // collector: unlocked info + chat/done). Shared by notifications + Track.
     function showNotifDetailForCollectRequest(cr, typeLabel) {
@@ -2289,12 +2587,23 @@
         html += '</div>';
 
         var actions = '';
+        var crId = cr ? escapeHtml(cr.collectRequestId) : '';
         if (cr && cr.role === 'owner' && cr.status === 'requested') {
-            actions = '<button type="button" class="btn-profile-primary" data-approve="' + escapeHtml(cr.collectRequestId) + '"><i class="fa-solid fa-check"></i> Approve</button>' +
-                      '<button type="button" class="btn-profile-delete" data-reject="' + escapeHtml(cr.collectRequestId) + '"><i class="fa-solid fa-xmark"></i> Reject</button>';
-        } else if (cr && cr.status === 'approved') {
+            actions = '<button type="button" class="btn-profile-primary" data-approve="' + crId + '"><i class="fa-solid fa-check"></i> Approve</button>' +
+                      '<button type="button" class="btn-profile-delete" data-reject="' + crId + '"><i class="fa-solid fa-xmark"></i> Reject</button>';
+        } else if (cr && cr.role === 'owner' && cr.status === 'accepted') {
+            // Owner picked this quote but has NOT yet confirmed. No address or
+            // phone is shown — the unlock point is strictly server-driven and
+            // only opens after Confirm deal flips cr.unlocked server-side.
+            html += '<p class="unlock-note">You picked this quote. Confirm to share your address and open chat.</p>';
+            actions = '<button type="button" class="btn-profile-primary" data-confirm="' + crId + '"><i class="fa-solid fa-handshake"></i> Confirm deal</button>' +
+                      '<button type="button" class="btn-profile-secondary" data-cancel="' + crId + '"><i class="fa-solid fa-xmark"></i> Cancel</button>';
+        } else if (cr && cr.unlocked === true) {
+            // Server-driven unlock: cr.unlocked is true only for statuses in
+            // UNLOCK_STATUSES (confirmed/collected/disputed). The frontend never
+            // infers unlock from anything but the server's cr.unlocked/status.
             html += '<div class="unlock-card">';
-            html += '<div class="unlock-title"><i class="fa-solid fa-lock-open"></i> Request Approved</div>';
+            html += '<div class="unlock-title"><i class="fa-solid fa-lock-open"></i> Deal confirmed</div>';
             if (cr.role === 'collector') {
                 if (cr.fullAddress) html += detailRow('Full address', cr.fullAddress);
                 if (cr.ownerPhone) html += detailRow('Owner phone', cr.ownerPhone);
@@ -2303,8 +2612,16 @@
             }
             html += '<p class="unlock-note">Address &amp; contact unlocked. You can now chat.</p>';
             html += '</div>';
-            actions = '<button type="button" class="btn-profile-primary" data-chat="' + escapeHtml(cr.collectRequestId) + '"><i class="fa-solid fa-comments"></i> Open Chat</button>' +
-                      '<button type="button" class="btn-profile-secondary" data-done="' + escapeHtml(cr.collectRequestId) + '"><i class="fa-solid fa-flag-checkered"></i> Mark as Collected</button>';
+            actions = '<button type="button" class="btn-profile-primary" data-chat="' + crId + '"><i class="fa-solid fa-comments"></i> Open Chat</button>' +
+                      '<button type="button" class="btn-profile-secondary" data-done="' + crId + '"><i class="fa-solid fa-flag-checkered"></i> Mark as Collected</button>';
+            // Report a problem is available while confirmed/collected.
+            if (cr.status === 'confirmed' || cr.status === 'collected') {
+                actions += '<button type="button" class="btn-profile-secondary" data-dispute="' + crId + '"><i class="fa-solid fa-triangle-exclamation"></i> Report a problem</button>';
+            }
+            // The owner may still cancel a confirmed job.
+            if (cr.role === 'owner' && cr.status === 'confirmed') {
+                actions += '<button type="button" class="btn-profile-delete" data-cancel="' + crId + '"><i class="fa-solid fa-xmark"></i> Cancel job</button>';
+            }
         }
 
         notifDetailEl.innerHTML = html + '<div class="notif-detail-actions">' + actions + '</div>';
@@ -2312,10 +2629,6 @@
     }
 
     function wireNotifDetailActions() {
-        var approveBtn = notifDetailEl.querySelector('[data-approve]');
-        var rejectBtn = notifDetailEl.querySelector('[data-reject]');
-        var doneBtn = notifDetailEl.querySelector('[data-done]');
-
         function act(suffix, id, btn) {
             btn.disabled = true;
             collectFetch('POST', { collectRequestId: id }, suffix).then(function() {
@@ -2330,13 +2643,69 @@
                     '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>');
             });
         }
-        var chatBtn = notifDetailEl.querySelector('[data-chat]');
-        if (approveBtn) approveBtn.addEventListener('click', function() { act('approve', approveBtn.getAttribute('data-approve'), approveBtn); });
-        if (rejectBtn) rejectBtn.addEventListener('click', function() { act('reject', rejectBtn.getAttribute('data-reject'), rejectBtn); });
-        if (doneBtn) doneBtn.addEventListener('click', function() { act('done', doneBtn.getAttribute('data-done'), doneBtn); });
-        if (chatBtn) chatBtn.addEventListener('click', function() {
-            openChatPage(chatBtn.getAttribute('data-chat'));
-        });
+
+        // Approve / reject / confirm / cancel all post {collectRequestId} and
+        // refresh via act(). Multiple quote cards can be present, so wire every
+        // matching button, not just the first.
+        bindAll('[data-approve]', 'approve');
+        bindAll('[data-reject]', 'reject');
+        bindAll('[data-done]', 'done');
+        bindAll('[data-confirm]', 'confirm');
+        bindAll('[data-cancel]', 'cancel');
+
+        function bindAll(selector, suffix) {
+            var attr = selector.replace(/[\[\]]/g, '');  // 'data-approve'
+            var btns = notifDetailEl.querySelectorAll(selector);
+            for (var i = 0; i < btns.length; i++) {
+                (function(btn) {
+                    btn.addEventListener('click', function() {
+                        act(suffix, btn.getAttribute(attr), btn);
+                    });
+                })(btns[i]);
+            }
+        }
+
+        // Dispute: collect a reason, then POST {collectRequestId, reason} to 'dispute'.
+        var disputeBtns = notifDetailEl.querySelectorAll('[data-dispute]');
+        for (var d = 0; d < disputeBtns.length; d++) {
+            (function(btn) {
+                btn.addEventListener('click', function() {
+                    var id = btn.getAttribute('data-dispute');
+                    var reason = window.prompt('Describe the problem (this opens a dispute):', '');
+                    if (reason === null) return;  // cancelled
+                    btn.disabled = true;
+                    collectFetch('POST', { collectRequestId: id, reason: reason }, 'dispute').then(function() {
+                        loadNotifications();
+                        loadLifecycleRequests();
+                        refreshNotifBadge();
+                        notifDetailEl.innerHTML = '<div class="placeholder-text">Problem reported.</div>';
+                    }).catch(function(err) {
+                        btn.disabled = false;
+                        notifDetailEl.insertAdjacentHTML('beforeend',
+                            '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>');
+                    });
+                });
+            })(disputeBtns[d]);
+        }
+
+        // View details: re-open the single-request detail for that quote.
+        var openBtns = notifDetailEl.querySelectorAll('[data-open]');
+        for (var o = 0; o < openBtns.length; o++) {
+            (function(btn) {
+                btn.addEventListener('click', function() {
+                    showNotifDetailForCollectRequest(findCollectRequest(btn.getAttribute('data-open')));
+                });
+            })(openBtns[o]);
+        }
+
+        var chatBtns = notifDetailEl.querySelectorAll('[data-chat]');
+        for (var c = 0; c < chatBtns.length; c++) {
+            (function(btn) {
+                btn.addEventListener('click', function() {
+                    openChatPage(btn.getAttribute('data-chat'));
+                });
+            })(chatBtns[c]);
+        }
     }
 
     // ===================== P2P Chat (AppSync Events + polling fallback) =====================
@@ -2691,6 +3060,120 @@
 
     function escapeHtml(text) {
         return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // ===================== Admin: collector verification queue =====================
+    (function wireAdminNav() {
+        var btn = document.getElementById('adminNavBtn');
+        if (btn) btn.addEventListener('click', function() { navigate('admin'); });
+        var sel = document.getElementById('adminStatusFilter');
+        if (sel) sel.addEventListener('change', loadAdminQueue);
+    })();
+
+    // Router entry: admin view visible — load the verification queue.
+    function onEnterAdmin() {
+        loadAdminQueue();
+    }
+
+    function loadAdminQueue() {
+        var cards = document.getElementById('adminQueueCards');
+        var sel = document.getElementById('adminStatusFilter');
+        if (!cards) return;
+        var status = (sel && sel.value) || 'pending';
+        cards.innerHTML = '<div class="placeholder-text">Loading...</div>';
+
+        collectFetch('GET', null, '/admin/collectors?status=' + encodeURIComponent(status))
+            .then(function(data) {
+                renderAdminQueue(cards, (data && data.collectors) || []);
+            }).catch(function(err) {
+                cards.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
+            });
+    }
+
+    function renderAdminQueue(container, collectors) {
+        if (!collectors.length) {
+            container.innerHTML = '<div class="placeholder-text">Nothing in this queue.</div>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < collectors.length; i++) {
+            var c = collectors[i];
+            var id = escapeHtml(c.userId);
+            html += '<div class="report-summary admin-collector-card" data-collector="' + id + '">';
+            html += detailRow('Business', c.businessName || '—');
+            html += detailRow('Registration', c.registrationNumber || '—');
+            html += detailRow('License', c.wasteCarrierLicense || '—');
+            html += detailRow('Service areas', (c.serviceAreas || []).join(', ') || '—');
+            html += detailRow('Waste categories', (c.wasteCategories || []).join(', ') || '—');
+            html += detailRow('Contact', (c.contactPhone || '') + (c.contactEmail ? ' / ' + c.contactEmail : ''));
+            html += '<div class="report-summary-row"><span>Status</span>' + statusBadge(c.status) + '</div>';
+
+            // Document View links from the presigned GET URLs the server returned.
+            var docUrls = c.docUrls || {};
+            var docKeys = Object.keys(docUrls);
+            if (docKeys.length) {
+                html += '<div class="report-summary-row"><span>Documents</span><strong>';
+                for (var d = 0; d < docKeys.length; d++) {
+                    var u = docUrls[docKeys[d]];
+                    if (!u || !/^https?:\/\//i.test(u)) continue;
+                    html += '<a href="' + escapeHtml(u) + '" target="_blank" rel="noopener noreferrer" ' +
+                        'class="admin-doc-link">' + escapeHtml(docKeys[d]) + '</a> ';
+                }
+                html += '</strong></div>';
+            }
+
+            var actions = '';
+            if (c.status === 'pending') {
+                actions = '<button type="button" class="btn-profile-primary" data-admin-approve="' + id + '">Approve</button>' +
+                          '<button type="button" class="btn-profile-delete" data-admin-reject="' + id + '">Reject</button>';
+            } else if (c.status === 'approved') {
+                actions = '<button type="button" class="btn-profile-secondary" data-admin-suspend="' + id + '">Suspend</button>';
+            }
+            html += '<div class="notif-detail-actions">' + actions + '</div>';
+            html += '</div>';
+        }
+        container.innerHTML = html;
+        wireAdminQueueActions(container);
+    }
+
+    function wireAdminQueueActions(container) {
+        function adminAct(id, action, body, btn) {
+            btn.disabled = true;
+            collectFetch('POST', body || null, '/admin/collectors/' + encodeURIComponent(id) + '/' + action)
+                .then(function() { loadAdminQueue(); })
+                .catch(function(err) {
+                    btn.disabled = false;
+                    container.insertAdjacentHTML('beforeend',
+                        '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>');
+                });
+        }
+
+        bindAdmin('[data-admin-approve]', 'approve', null);
+        bindAdmin('[data-admin-suspend]', 'suspend', null);
+
+        function bindAdmin(selector, action, bodyFn) {
+            var attr = selector.replace(/[\[\]]/g, '');
+            var btns = container.querySelectorAll(selector);
+            for (var i = 0; i < btns.length; i++) {
+                (function(btn) {
+                    btn.addEventListener('click', function() {
+                        adminAct(btn.getAttribute(attr), action, bodyFn ? bodyFn() : null, btn);
+                    });
+                })(btns[i]);
+            }
+        }
+
+        // Reject needs a reason.
+        var rejectBtns = container.querySelectorAll('[data-admin-reject]');
+        for (var r = 0; r < rejectBtns.length; r++) {
+            (function(btn) {
+                btn.addEventListener('click', function() {
+                    var reason = window.prompt('Reason for rejection:', '');
+                    if (reason === null) return;
+                    adminAct(btn.getAttribute('data-admin-reject'), 'reject', { reason: reason }, btn);
+                });
+            })(rejectBtns[r]);
+        }
     }
 
     // === Nearby Facilities: map + list ===

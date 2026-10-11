@@ -2645,10 +2645,46 @@ body.on-subpage footer {
 
 .status-open { background: #fff3e0; color: #e67e00; }
 .status-requested { background: #e3f2fd; color: #1565c0; }
+.status-accepted { background: #e3f2fd; color: #1565c0; }
 .status-collecting { background: #e3f2fd; color: #1565c0; }
 .status-rejected { background: #ffebee; color: #c62828; }
+.status-disputed { background: #ffebee; color: #c62828; }
+.status-cancelled { background: #eceff1; color: #607d8b; }
+.status-closed { background: #eceff1; color: #607d8b; }
+.status-confirmed,
 .status-collected,
 .status-done { background: #e8f5e9; color: #2e7d32; }
+
+/* === Phase-1 marketplace helpers (quotes / collector / admin) === */
+.quote-card,
+.admin-collector-card {
+    margin-bottom: 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid #eee;
+}
+.collector-doc-status {
+    display: block;
+    margin-top: 0.25rem;
+    color: #607d8b;
+    font-size: 0.78rem;
+}
+.admin-filter {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 1rem;
+}
+.admin-filter select {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+}
+.admin-doc-link {
+    display: inline-block;
+    margin-right: 0.4rem;
+    color: #1565c0;
+    text-decoration: underline;
+}
 
 @media (max-width: 768px) {
     .portal-sheet {
