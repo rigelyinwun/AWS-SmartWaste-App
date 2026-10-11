@@ -160,7 +160,8 @@ def validate_input(user_content):
         return "VALID" in reply
     except Exception as e:
         logger.error("Validation error: %s", str(e))
-        return True
+        # Fail closed: reject when validation cannot be completed.
+        return False
 
 
 @app.route("/", methods=["POST", "OPTIONS"], defaults={"path": ""})

@@ -1,141 +1,233 @@
 # SmartWaste
 
-AI-powered waste analysis and disposal guide. Upload a photo of any waste item and get instant identification, disposal instructions, environmental impact analysis, and chat-based assistance.
+AI-powered waste analysis, disposal guidance, and a peer-to-peer waste collection platform. Upload a photo of any waste item to get instant identification, disposal steps, nearby recycling facilities on a map, environmental impact flash cards, and an AI chat assistant — then list the item for other users to collect, coordinate pickup via real-time chat, and track everything from a personal portal.
+
+**Live:** https://d3f173je1qvblr.cloudfront.net
+
+---
 
 ## Features
 
-- **Waste Identification** — Analyzes uploaded images to identify material type, category, recyclability, and composition
-- **Disposal Guidance** — Provides step-by-step disposal method flowchart, nearby facility suggestions, eco-friendly alternatives, and action steps
-- **Environmental Impact** — Comprehensive analysis including decomposition time, land/water/wildlife impacts, climate data, and future projections
-- **AI Chat Assistant** — Floating chatbot for follow-up questions about waste disposal, recycling guidelines, and eco-friendly practices
-- **Input Validation** — Rejects inappropriate or non-waste images with a user-friendly popup
+### Waste analysis (no login required)
+- **Waste Details** — identifies category, confidence, description, estimated weight, recyclability, and material composition (fixed JSON → styled table).
+- **Future Actions** — disposal-method flowchart + advice, a **map of nearby recycling centers / disposal stations / collection companies** (Amazon Location + MapLibre), and **Online Trading Platforms** with multilingual (EN / 中文 / BM) Google search links to resell, donate, or trade the item.
+- **Environmental Impacts** — identification + decomposition time + a landfill-percentage gauge, plus a 3×3 grid of **flip cards** (land, water, wildlife, climate, health, circular value, future impact, best practices, edu insights) with images on the back.
+- **AI Chat Assistant** — floating chatbot for follow-up disposal questions (streamed responses).
+- **Content validation** — non-waste / inappropriate images are rejected (fails closed), both at analysis time and again server-side before an item can be listed.
 
-## Architecture
+### Peer-to-peer waste collection (requires login)
+- **Accounts** — real sign-up / email-verification / login via Amazon Cognito.
+- **Profile page** — view/edit name, phone, address, settings; rate & feedback; privacy & terms; logout; delete account (with confirmation).
+- **Allow Public Collect** — list an analyzed item for others to collect (details form, address kept private until approval).
+- **Waste Collect Portal** — browse all open public listings with search + filters (type, date, distance), and a **History** tab split into *Posted* (your listings) and *Collected* (items you collected from others).
+- **Request lifecycle** — request → owner approves/rejects → address & contact unlock → mark collected → history, with a **Notifications** page driving approvals.
+- **Real-time chat** — approved owner/collector pairs chat via AWS AppSync Events (WebSocket), with an automatic polling fallback.
+- **Device push notifications** — opt-in **Web Push** (via a service worker + VAPID) delivers OS-level notifications for new collect requests, approvals, and chat messages **even when the tab or browser is closed** (like YouTube's web notifications).
+
+The app is a single-page app with hash-based routing (`#/profile`, `#/portal`, `#/chat`, `#/notifications`) so pages are bookmarkable and refresh-safe on a static host.
+
+---
+
+## AWS services & architecture
 
 ```
-Frontend (S3 + CloudFront)
-    ├── index.html / style.css / app.js
-    └── Static assets (images)
+                         ┌─────────────────────────────────────────────┐
+   Browser (SPA)         │  Amazon CloudFront  →  Amazon S3 (static site)│
+   index.html/app.js/css └─────────────────────────────────────────────┘
+        │
+        │  • Cognito SDK (login/signup)         • MapLibre GL JS (map tiles)
+        │  • AppSync Events WS (chat realtime)  • fetch() to Lambda URLs
+        │  • Service worker (sw.js) + Web Push  → OS notifications (closed-tab)
+        ▼
+ ┌───────────────────────── Lambda Function URLs (Lambda Web Adapter + Flask) ─────────────────────────┐
+ │  waste_details         environmental_impact      smartwaste_assistant   (streamed, public)           │
+ │  further_actions       nearby_facilities         profile  collect       (JSON; JWT-protected ones)   │
+ └──────────────────────────────────────────────────────────────────────────────────────────────────┘
+        │                         │                        │                         │
+        ▼                         ▼                        ▼                         ▼
+  Amazon Bedrock          Amazon Location          Amazon Cognito           Amazon DynamoDB
+  (Claude Haiku 4.5)      (geo-places search,      (User Pool: accounts,    (users, feedback,
+   image + text           map tiles via            email verification,      waste_requests,
+   analysis, chat,        browser API key)         JWT tokens)              collect_requests,
+   content validation)                                                      notifications, messages,
+                                                                            push_subscriptions)
 
-Backend (AWS Lambda + Lambda Web Adapter)
-    ├── waste_details        → Waste identification & validation
-    ├── further_actions      → Disposal guidance & recommendations
-    ├── environmental_impact → Environmental & climate analysis
-    └── smartwaste_assistant → Chat assistant
-
-Infrastructure
-    ├── SAM template (infra/template.yaml)
-    ├── GitHub Actions CI/CD (.github/workflows/deploy.yml)
-    └── CloudFront distribution (HTTPS + caching)
+          AWS AppSync Events (real-time chat pub/sub, API-key auth)   •   Web Push (VAPID → browser push services)
 ```
 
-## Tech Stack
+### Service-by-service
 
-- **Frontend**: HTML, CSS, JavaScript (vanilla)
-- **Backend**: Python 3.12, Flask, AWS Lambda with Lambda Web Adapter (response streaming)
-- **AI Model**: Claude Haiku 4.5 via Amazon Bedrock (global inference profile)
-- **Infrastructure**: AWS SAM, S3, CloudFront, Lambda Function URLs
-- **CI/CD**: GitHub Actions
+| AWS service | Used for |
+|---|---|
+| **Amazon Bedrock** (Claude Haiku 4.5, global inference profile) | Image + text waste analysis across all analysis Lambdas; chat assistant; content validation; waste-type enrichment; multilingual trading-search terms |
+| **AWS Lambda** (+ Lambda Web Adapter, Flask, Python 3.12) | All 7 backend functions, exposed via **Function URLs** (streamed for analysis/chat, buffered JSON for profile/collect/facilities) |
+| **Amazon Cognito** (User Pool + public app client) | User accounts, real email-verification sign-up, login, and the JWTs that authorize the profile/collect APIs |
+| **Amazon DynamoDB** (7 tables, PAY_PER_REQUEST) | `users`, `feedback`, `waste_requests` (+GSIs), `collect_requests` (+GSIs), `notifications`, `messages`, `push_subscriptions` |
+| **Amazon Location Service** (geo-places + maps) | Server-side geocoding & POI search for nearby facilities (Lambda IAM role); browser map tiles via a scoped API key (MapLibre) |
+| **AWS AppSync Events** (+ ChannelNamespace + API key) | Real-time chat push between approved pairs (publish is JWT-authorized server-side; browser subscribes with the API key) |
+| **Web Push** (W3C Push API + VAPID, `pywebpush`) | OS-level device notifications for new requests, approvals, and chat messages while the tab/browser is closed; a service worker (`sw.js`) receives pushes, the `collect` Lambda signs them with the VAPID keypair and sends to each browser's push service |
+| **Amazon S3** | Static website hosting (frontend) |
+| **Amazon CloudFront** | HTTPS + CDN caching in front of S3 |
+| **AWS IAM** | One shared Lambda execution role (Bedrock, geo-places, DynamoDB, Cognito admin, AppSync publish); a role for AppSync→CloudWatch logs |
+| **Amazon CloudWatch** | Lambda logs + AppSync Events request logging |
+| **AWS SAM / CloudFormation** | Infrastructure as code (`infra/template.yaml`) |
+| **GitHub Actions** | CI/CD: SAM build/deploy, CORS config, URL/key injection, S3 sync, CloudFront invalidation |
 
-## Project Structure
+### Auth model (how security works)
+- The browser only talks to **Lambda Function URLs** and sends the Cognito **ID token** as `Authorization: Bearer`.
+- The `profile` and `collect` Lambdas **verify the JWT themselves** (signature against the pool's JWKS, issuer, audience, expiry) and enforce per-user ownership / membership on every mutating route.
+- Addresses & phone numbers in listings stay **masked** in the public list and unlock only to the collector **after the owner approves**.
+- The map tile key is a browser-scoped Amazon Location key (tiles only); all Places search and chat publishing happen server-side via the Lambda role.
+
+---
+
+## Tech stack
+
+- **Frontend:** vanilla HTML / CSS / JavaScript (SPA, hash router), MapLibre GL JS, `amazon-cognito-identity-js`, a service worker + Web Push (VAPID)
+- **Backend:** Python 3.12, Flask, AWS Lambda Web Adapter; `boto3`, `PyJWT` + `cryptography` (JWT verification), `pywebpush` (Web Push)
+- **AI model:** Claude Haiku 4.5 via Amazon Bedrock (`global.anthropic.claude-haiku-4-5-20251001-v1:0`)
+- **IaC / CI-CD:** AWS SAM, GitHub Actions
+- **Region:** `ap-southeast-1` (Bedrock, DynamoDB, Cognito, AppSync); `geo-places` is called in `us-east-1` (not offered in ap-southeast-1 — the place database is global)
+
+---
+
+## Project structure
 
 ```
 smartwaste-app/
 ├── .github/workflows/deploy.yml   # CI/CD pipeline
-├── .gitattributes
 ├── .gitignore
 ├── README.md
+├── pytest.ini                     # test config
+├── requirements-dev.txt           # pytest (dev)
 ├── frontend/
-│   ├── index.html                  # Main page
-│   ├── style.css                   # Styles
-│   ├── app.js                      # Client logic (streaming, rendering)
-│   └── images/
-│       ├── logo.png                # App logo
-│       ├── landfill.jpg            # Land impact image
-│       ├── water.jpeg              # Water impact image
-│       └── wildlife.jpg            # Wildlife impact image
+│   ├── index.html                 # SPA shell (header, tabs, pages, modals, injected config)
+│   ├── style.css                  # all styles (responsive)
+│   ├── app.js                     # client logic: analysis, auth, router, portal, chat, notifications, push
+│   ├── sw.js                      # service worker (receives Web Push, handles notification clicks)
+│   └── images/                    # logo + env-impact card images
 ├── infra/
-│   └── template.yaml              # SAM template
-└── lambdas/
-    ├── waste_details/
-    │   ├── app.py
-    │   ├── run.sh
-    │   └── requirements.txt
-    ├── further_actions/
-    │   ├── app.py
-    │   ├── run.sh
-    │   └── requirements.txt
-    ├── environmental_impact/
-    │   ├── app.py
-    │   ├── run.sh
-    │   └── requirements.txt
-    └── smartwaste_assistant/
-        ├── app.py
-        ├── run.sh
-        └── requirements.txt
+│   └── template.yaml              # SAM template (all AWS resources)
+├── lambdas/
+│   ├── waste_details/             # identification + content validation
+│   ├── further_actions/           # disposal guidance (streamed)
+│   ├── environmental_impact/      # impact flash-card JSON
+│   ├── nearby_facilities/         # Amazon Location search + trading platforms
+│   ├── smartwaste_assistant/      # AI chat assistant (streamed)
+│   ├── profile/                   # JWT-verified profile CRUD + feedback + delete account
+│   └── collect/                   # JWT-verified report/request/approve/reject/done + chat
+│       └── (each: app.py, run.sh, requirements.txt)
+└── tests/
+    ├── conftest.py                # stubs boto3/flask/jwt for pure-logic tests
+    ├── test_collect.py
+    ├── test_nearby_facilities.py
+    └── test_parsers.py
 ```
+
+---
 
 ## Deployment
 
 ### Prerequisites
+1. AWS account with **Bedrock model access** enabled for Claude Haiku 4.5.
+2. An **Amazon Location map API key** created in the console (Maps `GetTile` action), stored as a GitHub secret.
+2a. A **VAPID keypair** for Web Push (see *Web Push setup* below), stored as GitHub secrets.
+3. AWS CLI + SAM CLI installed; an S3 bucket for SAM artifacts.
+4. A deploy IAM user whose permissions cover all resource types created (CloudFormation, Lambda, S3, API Gateway, **Cognito, DynamoDB, AppSync, Location, IAM roles**).
 
-1. AWS account with Bedrock model access enabled for Claude Haiku 4.5
-2. AWS CLI and SAM CLI installed
-3. S3 bucket for SAM deployment artifacts
-4. GitHub repository with secrets configured
-
-### GitHub Secrets Required
+### GitHub secrets
 
 | Secret | Description |
 |--------|-------------|
-| `AWS_ACCESS_KEY_ID` | IAM user access key |
-| `AWS_SECRET_ACCESS_KEY` | IAM user secret key |
-| `SAM_DEPLOY_BUCKET` | S3 bucket for SAM artifacts |
+| `AWS_ACCESS_KEY_ID` | Deploy IAM user access key |
+| `AWS_SECRET_ACCESS_KEY` | Deploy IAM user secret key |
+| `SAM_DEPLOY_BUCKET` | S3 bucket for SAM build artifacts |
+| `MAP_API_KEY` | Amazon Location browser map key (Maps GetTile) |
+| `VAPID_PUBLIC_KEY` | Web Push VAPID public key (also injected into the frontend) |
+| `VAPID_PRIVATE_KEY` | Web Push VAPID private key (passed to the `collect` Lambda; `NoEcho`) |
+| `VAPID_SUBJECT` | VAPID contact (`mailto:you@example.com` or an `https://` URL) |
 
 ### Deploy
-
-Push to `main` branch triggers automatic deployment:
+Push to `main` triggers the GitHub Actions pipeline (SAM build + deploy, CORS config on each Function URL, injection of all URLs/IDs/keys into `index.html`, S3 sync, CloudFront invalidation):
 
 ```bash
 git push origin main
 ```
 
-Or trigger manually via GitHub Actions → "Run workflow".
+Or run it manually from the GitHub Actions tab.
 
-### Manual Deploy
+### Manual deploy
 
 ```bash
-# Build
 sam build --template infra/template.yaml
-
-# Deploy
 sam deploy --stack-name smartwaste \
   --s3-bucket YOUR_BUCKET \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
-  --region ap-southeast-1 \
-  --no-confirm-changeset
-
-# Get outputs
-aws cloudformation describe-stacks --stack-name smartwaste \
-  --query "Stacks[0].Outputs" --output table
+  --region ap-southeast-1 --no-confirm-changeset
 ```
 
-## How It Works
+After deploy, the pipeline injects the stack outputs (Function URLs, Cognito IDs, AppSync endpoints) and the map key into the frontend before syncing to S3.
 
-1. User uploads a photo of a waste item
-2. Optionally adds a description and location
-3. Clicks "Analyze Waste"
-4. Frontend validates via the waste_details Lambda (rejects non-waste/inappropriate content)
-5. If valid, streams results from all 3 analysis Lambdas simultaneously
-6. Results render as structured UI: table, flowchart, image cards, and text sections
-7. Chat assistant is available via floating button for follow-up questions
+---
 
-## Model & Region
+## Web Push setup
 
-- **Model**: `global.anthropic.claude-haiku-4-5-20251001-v1:0` (global cross-region inference profile)
-- **Region**: `ap-southeast-1` (Singapore)
-- **Streaming**: Lambda Function URLs with `RESPONSE_STREAM` invoke mode
+Device notifications use the standard **Web Push** protocol: the browser registers a service worker (`frontend/sw.js`), subscribes to its browser's push service, and stores the subscription in the `push_subscriptions` DynamoDB table (keyed by `userId` + endpoint). When a collect **request**, **approval**, or **chat message** fires, the `collect` Lambda signs a payload with the VAPID keys (via `pywebpush`) and hands it to each subscriber's push service, which wakes the service worker and shows an OS notification — no open tab required.
 
-## Live URL
+### 1. Generate a VAPID keypair (one time)
 
-- CloudFront: `https://d25ah8hrqybhsg.cloudfront.net`
+With Node:
+
+```bash
+npx web-push generate-vapid-keys
+```
+
+Or with Python:
+
+```bash
+pip install py-vapid
+vapid --gen            # writes private_key.pem / public_key.pem
+vapid --applicationServerKey   # prints the base64url public key for the browser
+```
+
+### 2. Add three GitHub secrets
+
+- `VAPID_PUBLIC_KEY` — the base64url public key
+- `VAPID_PRIVATE_KEY` — the private key
+- `VAPID_SUBJECT` — `mailto:you@example.com` (or an `https://` contact URL)
+
+The pipeline passes these to CloudFormation via `--parameter-overrides` (the private key is a `NoEcho` parameter) and injects the public key into `index.html`.
+
+### 3. Opt in (per user, per device)
+
+Web Push is opt-in. While **logged in**, open **Profile → Settings** and click **Enable notifications**, then accept the browser permission prompt. After that the device receives pushes even when the site is closed.
+
+**Notes**
+- Requires HTTPS (CloudFront provides it) and a browser that supports the Push API.
+- **iOS/iPadOS**: Web Push works only when the site is **added to the Home Screen** (installed as a PWA); Safari tabs alone won't receive pushes.
+- `pywebpush` is lazy-imported in the Lambda, so the push path has no effect until the VAPID keys are configured.
+
+---
+
+## Running tests
+
+Unit tests cover the pure logic (JSON parsers, address masking, request-view unlocking, facility classification, distance/URL helpers) with AWS dependencies stubbed — no credentials or network needed.
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+> Scope: these are unit tests for pure functions. AWS integration paths (DynamoDB, live JWT verification, Bedrock), the end-to-end request lifecycle, and the frontend JS are not yet covered by automated tests.
+
+---
+
+## Request lifecycle (peer-to-peer collection)
+
+```
+report (owner lists item)        status: open
+  → collector requests           status: requested   → owner notified
+  → owner approves               status: collecting  → collector notified; address/contact unlock; chat enabled
+     owner rejects               status: open (reopened) → collector notified
+  → either marks done            status: collected   → both notified; moves to History
+```

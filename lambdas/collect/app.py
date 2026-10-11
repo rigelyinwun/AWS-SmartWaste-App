@@ -28,12 +28,74 @@ APP_CLIENT_ID = os.environ.get("APP_CLIENT_ID", "")
 MESSAGES_TABLE = os.environ.get("MESSAGES_TABLE", "")
 APPSYNC_HTTP_DNS = os.environ.get("APPSYNC_HTTP_DNS", "")
 APPSYNC_API_KEY = os.environ.get("APPSYNC_API_KEY", "")
+PUSH_SUBS_TABLE = os.environ.get("PUSH_SUBS_TABLE", "")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
+VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:admin@smartwaste.example")
 
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
 table = dynamodb.Table(REQUESTS_TABLE) if REQUESTS_TABLE else None
 creq_table = dynamodb.Table(COLLECT_REQUESTS_TABLE) if COLLECT_REQUESTS_TABLE else None
 notif_table = dynamodb.Table(NOTIFICATIONS_TABLE) if NOTIFICATIONS_TABLE else None
 msg_table = dynamodb.Table(MESSAGES_TABLE) if MESSAGES_TABLE else None
+push_table = dynamodb.Table(PUSH_SUBS_TABLE) if PUSH_SUBS_TABLE else None
+
+# Bedrock is used to re-validate the uploaded image server-side before an item
+# is listed publicly (so a client bypassing the browser can't post junk).
+bedrock = boto3.client("bedrock-runtime", region_name=REGION)
+VALIDATION_MODEL_ID = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+VALIDATION_PROMPT = """You are a strict content validator for a waste disposal app. Look at this image and the description text carefully.
+
+Reply with ONLY the word "VALID" or "INVALID":
+
+Reply "VALID" ONLY if ALL of these are true:
+1. The image shows a REAL PHYSICAL object that exists in the real world (not a digital image, screenshot, icon, logo, meme, drawing, or digital graphic)
+2. The object could reasonably be disposed of as waste or recycled
+3. The description (if provided) is not offensive, hateful, violent, or inappropriate
+
+Reply "INVALID" if ANY of these are true:
+1. The image is a screenshot, digital graphic, icon, logo, meme, cartoon, or drawing
+2. The image shows people (selfies, portraits), violence, sexual content, or offensive material
+3. The image is completely unrelated to physical waste items
+4. The description contains offensive, hateful, violent, inappropriate, or vulgar language
+5. The image is of a landscape, building, or scene with no identifiable waste item
+
+You MUST reply with ONLY one word: VALID or INVALID. No explanation."""
+
+
+def validate_image(file_data, file_mime, description):
+    """Server-side re-validation of the uploaded image before listing.
+    Returns True only if the model clearly says VALID. Fails closed on error."""
+    if not file_data or not file_mime or not str(file_mime).startswith("image/"):
+        # No usable image to validate — reject (listing requires a valid item).
+        return False
+    content = [{
+        "type": "image",
+        "source": {"type": "base64", "media_type": file_mime, "data": file_data},
+    }]
+    if description:
+        content.append({"type": "text", "text": "Description: " + str(description)[:500]})
+    content.append({"type": "text", "text": VALIDATION_PROMPT})
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 10,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": content}],
+    }
+    try:
+        resp = bedrock.invoke_model(
+            modelId=VALIDATION_MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(body),
+        )
+        result = json.loads(resp["body"].read())
+        reply = result.get("content", [{}])[0].get("text", "").strip().upper()
+        logger.info("Report image validation: %s", reply)
+        return "VALID" in reply and "INVALID" not in reply
+    except Exception as e:
+        logger.error("Report image validation error: %s", str(e))
+        return False  # fail closed
 
 ISSUER = "https://cognito-idp.{}.amazonaws.com/{}".format(REGION, USER_POOL_ID)
 JWKS_URL = ISSUER + "/.well-known/jwks.json"
@@ -93,7 +155,22 @@ def _s(v):
     return str(v).strip() if v is not None else ""
 
 
+REPORT_REJECTION = ("This item could not be verified as valid waste and was not "
+                    "listed. Please analyze a clear photo of a real waste item.")
+
+
 def create_report(claims, body):
+    if not table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    # Required contact fields (defense in depth; the UI also validates).
+    if not _s(body.get("contactName")) or not _s(body.get("phone")) or not _s(body.get("fullAddress")):
+        return json_response({"error": "Name, phone, and address are required"}, status=400)
+
+    # Server-side re-validation of the image so a client bypassing the browser
+    # cannot list non-waste / inappropriate content.
+    if not validate_image(body.get("file_data"), body.get("file_mime"), body.get("description")):
+        return json_response({"error": REPORT_REJECTION}, status=400)
+
     user_id = claims["sub"]
     now = int(time.time())
     request_id = str(uuid.uuid4())
@@ -204,10 +281,92 @@ def list_mine(claims):
     return {"requests": [public_view(it, owner=True) for it in items]}
 
 
-# ------------------- Notifications -------------------
+# ------------------- Web Push -------------------
 
+# Notification types that also trigger an OS/device push (kept to high-value
+# events so pushes don't feel spammy).
+PUSH_TYPES = {"request", "approved", "message"}
+
+
+def save_subscription(claims, body):
+    sub = body.get("subscription") or {}
+    endpoint = _s(sub.get("endpoint"))
+    if not endpoint:
+        return json_response({"error": "Missing subscription endpoint"}, status=400)
+    if not push_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    try:
+        push_table.put_item(Item={
+            "userId": claims["sub"],
+            "endpoint": endpoint,
+            "keys": sub.get("keys", {}) or {},
+            "createdAt": int(time.time()),
+        })
+    except Exception as e:
+        logger.error("save_subscription error: %s", str(e))
+        return json_response({"error": "Could not save subscription"}, status=500)
+    return {"ok": True}
+
+
+def remove_subscription(claims, body):
+    endpoint = _s(body.get("endpoint"))
+    if endpoint and push_table:
+        try:
+            push_table.delete_item(Key={"userId": claims["sub"], "endpoint": endpoint})
+        except Exception as e:
+            logger.error("remove_subscription error: %s", str(e))
+    return {"ok": True}
+
+
+def push_send(user_id, title, body_text, url="/"):
+    """Send a Web Push to all of a user's subscribed devices. Prunes dead
+    subscriptions (410 Gone / 404). Best-effort — never raises to the caller."""
+    if not push_table or not user_id or not VAPID_PRIVATE_KEY:
+        return
+    try:
+        from pywebpush import webpush, WebPushException
+    except Exception:
+        logger.warning("pywebpush unavailable; skipping push")
+        return
+    try:
+        resp = push_table.query(KeyConditionExpression=Key("userId").eq(user_id))
+        subs = resp.get("Items", [])
+    except Exception as e:
+        logger.error("push_send query error: %s", str(e))
+        return
+
+    payload = json.dumps({"title": title, "body": body_text, "url": url})
+    for s in subs:
+        subscription_info = {
+            "endpoint": s.get("endpoint"),
+            "keys": s.get("keys", {}),
+        }
+        try:
+            webpush(
+                subscription_info=subscription_info,
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": VAPID_SUBJECT},
+                timeout=5,
+            )
+        except WebPushException as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status in (404, 410):
+                # Subscription expired/unsubscribed — remove it.
+                try:
+                    push_table.delete_item(Key={"userId": user_id, "endpoint": s.get("endpoint")})
+                except Exception:
+                    pass
+            else:
+                logger.warning("webpush failed (%s): %s", status, str(e))
+        except Exception as e:
+            logger.warning("webpush error: %s", str(e))
+
+
+# ------------------- Notifications -------------------
 def notify(user_id, ntype, title, body, meta=None):
-    """Append a notification to a user's feed."""
+    """Append a notification to a user's feed, and push to their device for
+    high-value event types."""
     if not notif_table or not user_id:
         return
     try:
@@ -223,6 +382,13 @@ def notify(user_id, ntype, title, body, meta=None):
         })
     except Exception as e:
         logger.error("notify error: %s", str(e))
+
+    # Device push for the important events.
+    if ntype in PUSH_TYPES:
+        url = "/#/notifications"
+        if ntype == "message":
+            url = "/#/chat"
+        push_send(user_id, title, body, url)
 
 
 def _now_micros():
@@ -309,11 +475,18 @@ def _creq_view(cr, waste=None):
 
 def request_collect(claims, body):
     waste_id = _s(body.get("requestId")) or _s(body.get("wasteId"))
+    if not waste_id:
+        return json_response({"error": "Missing waste item id"}, status=400)
+    if not creq_table or not table:
+        return json_response({"error": "Service unavailable"}, status=503)
     waste = _get_waste(waste_id)
     if not waste:
         return json_response({"error": "Waste item not found"}, status=404)
     if waste.get("ownerId") == claims["sub"]:
         return json_response({"error": "You cannot collect your own item"}, status=400)
+    # Only items still open can be requested (prevents racing a taken item).
+    if waste.get("status") not in ("open", None):
+        return json_response({"error": "This item is no longer available"}, status=409)
 
     now = _now_micros()
     cr = {
@@ -360,11 +533,17 @@ def _get_creq(collect_request_id):
 
 def approve_request(claims, body):
     cr_id = _s(body.get("collectRequestId"))
+    if not cr_id:
+        return json_response({"error": "Missing request id"}, status=400)
+    if not creq_table:
+        return json_response({"error": "Service unavailable"}, status=503)
     cr = _get_creq(cr_id)
     if not cr:
         return json_response({"error": "Request not found"}, status=404)
     if cr.get("ownerId") != claims["sub"]:
         return json_response({"error": "Not authorized"}, status=403)
+    if cr.get("status") != "requested":
+        return json_response({"error": "This request can no longer be approved"}, status=409)
 
     creq_table.update_item(
         Key={"collectRequestId": cr_id},
@@ -394,11 +573,17 @@ def approve_request(claims, body):
 
 def reject_request(claims, body):
     cr_id = _s(body.get("collectRequestId"))
+    if not cr_id:
+        return json_response({"error": "Missing request id"}, status=400)
+    if not creq_table:
+        return json_response({"error": "Service unavailable"}, status=503)
     cr = _get_creq(cr_id)
     if not cr:
         return json_response({"error": "Request not found"}, status=404)
     if cr.get("ownerId") != claims["sub"]:
         return json_response({"error": "Not authorized"}, status=403)
+    if cr.get("status") != "requested":
+        return json_response({"error": "This request can no longer be rejected"}, status=409)
 
     creq_table.update_item(
         Key={"collectRequestId": cr_id},
@@ -424,6 +609,10 @@ def reject_request(claims, body):
 
 def mark_done(claims, body):
     cr_id = _s(body.get("collectRequestId"))
+    if not cr_id:
+        return json_response({"error": "Missing request id"}, status=400)
+    if not creq_table:
+        return json_response({"error": "Service unavailable"}, status=503)
     cr = _get_creq(cr_id)
     if not cr:
         return json_response({"error": "Request not found"}, status=404)
@@ -644,6 +833,10 @@ def handler(path):
                 return _unwrap(mark_done(claims, body))
             if route.endswith("message"):
                 return _unwrap(send_message(claims, body))
+            if route.endswith("unsubscribe"):
+                return _unwrap(remove_subscription(claims, body))
+            if route.endswith("subscribe"):
+                return _unwrap(save_subscription(claims, body))
             if route.endswith("notifications/read") or route.endswith("read"):
                 return _unwrap(mark_notifications_read(claims))
             return json_response({"error": "Unsupported route"}, status=400)

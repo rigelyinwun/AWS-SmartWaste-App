@@ -6,6 +6,19 @@ Parameters:
   DeployTimestamp:
     Type: String
     Default: "0"
+  VapidPublicKey:
+    Type: String
+    Default: ""
+    Description: Web Push VAPID public key (base64url).
+  VapidPrivateKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Web Push VAPID private key (base64url).
+  VapidSubject:
+    Type: String
+    Default: "mailto:admin@smartwaste.example"
+    Description: "VAPID subject (mailto or https contact URL)."
 
 Globals:
   Function:
@@ -147,6 +160,8 @@ Resources:
                   - !Sub "${NotificationsTable.Arn}/index/*"
                   - !GetAtt MessagesTable.Arn
                   - !Sub "${MessagesTable.Arn}/index/*"
+                  - !GetAtt PushSubscriptionsTable.Arn
+                  - !Sub "${PushSubscriptionsTable.Arn}/index/*"
         - PolicyName: ChatPublishPolicy
           PolicyDocument:
             Version: "2012-10-17"
@@ -299,6 +314,23 @@ Resources:
         - AttributeName: createdAt
           KeyType: RANGE
 
+  # Web Push subscriptions (one row per user device/browser)
+  PushSubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "smartwaste-push-subs-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: endpoint
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: endpoint
+          KeyType: RANGE
+
   # --- AppSync Events: real-time chat push ---
   ChatEventApi:
     Type: AWS::AppSync::Api
@@ -383,10 +415,14 @@ Resources:
           COLLECT_REQUESTS_TABLE: !Ref CollectRequestsTable
           NOTIFICATIONS_TABLE: !Ref NotificationsTable
           MESSAGES_TABLE: !Ref MessagesTable
+          PUSH_SUBS_TABLE: !Ref PushSubscriptionsTable
           USER_POOL_ID: !Ref UserPool
           APP_CLIENT_ID: !Ref UserPoolClient
           APPSYNC_HTTP_DNS: !GetAtt ChatEventApi.Dns.Http
           APPSYNC_API_KEY: !GetAtt ChatApiKey.ApiKey
+          VAPID_PUBLIC_KEY: !Ref VapidPublicKey
+          VAPID_PRIVATE_KEY: !Ref VapidPrivateKey
+          VAPID_SUBJECT: !Ref VapidSubject
       FunctionUrlConfig:
         AuthType: NONE
 

@@ -1594,6 +1594,14 @@ body.on-subpage footer {
     display: none;
 }
 
+/* On very small phones, drop the text greeting to keep the header uncluttered
+   (the profile icon already represents the signed-in account). */
+@media (max-width: 480px) {
+    .auth-greeting {
+        display: none;
+    }
+}
+
 .btn-auth-submit {
     background: var(--grad-primary);
     color: #fff;
@@ -1676,6 +1684,17 @@ body.on-subpage footer {
         width: 36px;
         height: 36px;
         font-size: 0.95rem;
+    }
+
+    /* Keep the notification badge neatly on the smaller bell. */
+    .icon-count-badge {
+        top: -3px;
+        right: -3px;
+        min-width: 16px;
+        height: 16px;
+        line-height: 16px;
+        font-size: 0.62rem;
+        border-width: 1.5px;
     }
 
     .btn-auth {
@@ -2642,8 +2661,8 @@ body.on-subpage footer {
 /* === Notification count badge (header bell) === */
 .icon-count-badge {
     position: absolute;
-    top: 2px;
-    right: 2px;
+    top: -4px;
+    right: -4px;
     min-width: 18px;
     height: 18px;
     padding: 0 4px;
@@ -2654,8 +2673,9 @@ body.on-subpage footer {
     font-weight: 700;
     line-height: 18px;
     text-align: center;
-    border: 2px solid var(--primary);
-    box-sizing: content-box;
+    border: 2px solid #fff;
+    box-sizing: border-box;
+    pointer-events: none;
 }
 
 .icon-count-badge[hidden] {
@@ -3307,4 +3327,48 @@ a.trading-name i {
     .portal-filter {
         flex: 1 1 calc(50% - 0.5rem);
     }
+}
+
+/* === Web Push opt-in (profile settings) === */
+.push-optin {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 0 0;
+    margin-top: 0.5rem;
+    border-top: 1px dashed var(--border);
+}
+
+.push-optin[hidden] {
+    display: none;
+}
+
+.push-optin-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.push-optin-text span {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.push-optin-text small {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
+.push-optin .btn-profile-secondary {
+    flex-shrink: 0;
+    padding: 0.5rem 1.1rem;
+}
+
+.push-optin .btn-profile-secondary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
 }

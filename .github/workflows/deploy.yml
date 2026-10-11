@@ -42,7 +42,11 @@ jobs:
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
             --force-upload \
-            --parameter-overrides DeployTimestamp=$(date +%s)
+            --parameter-overrides \
+              DeployTimestamp=$(date +%s) \
+              VapidPublicKey='${{ secrets.VAPID_PUBLIC_KEY }}' \
+              VapidPrivateKey='${{ secrets.VAPID_PRIVATE_KEY }}' \
+              VapidSubject='${{ secrets.VAPID_SUBJECT }}'
 
       - name: Get Stack Outputs and Inject URLs
         run: |
@@ -109,6 +113,11 @@ jobs:
           echo "CognitoClientId = $CLIENT_ID"
           if [ -z "$CLIENT_ID" ] || [ "$CLIENT_ID" = "None" ]; then echo "ERROR: CognitoClientId is empty"; exit 1; fi
           sed -i "s|__COGNITO_CLIENT_ID__|$CLIENT_ID|g" frontend/index.html
+
+          # VAPID public key for Web Push (browser subscribe). Safe to expose.
+          VAPID_PUB='${{ secrets.VAPID_PUBLIC_KEY }}'
+          echo "VapidPublicKey length ${#VAPID_PUB}"
+          sed -i "s#__VAPID_PUBLIC_KEY__#$VAPID_PUB#g" frontend/index.html
 
           URL=$(get_output ProfileUrl)
           echo "ProfileUrl = $URL"

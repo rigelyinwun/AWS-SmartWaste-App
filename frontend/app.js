@@ -3,6 +3,16 @@
 
     // STREAM_URLS and COGNITO_CONFIG are defined in index.html (injected by CI/CD)
 
+    // Register the Web Push service worker (progressive enhancement).
+    var _swRegistration = null;
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js').then(function(reg) {
+            _swRegistration = reg;
+        }).catch(function(e) {
+            console.warn('Service worker registration failed:', e);
+        });
+    }
+
     // ===================== Cognito Auth module =====================
     // Thin wrapper around amazon-cognito-identity-js. Exposes promise-based
     // signup/confirm/login/logout plus session accessors used across the app.
@@ -190,7 +200,18 @@
         uploadPreview.hidden = true;
         uploadZone.style.display = '';
         fileInput.value = '';
+        resetAnalysisState();
     });
+
+    // Clear any prior analysis so a stale result can't be listed/reported
+    // against a changed or removed image.
+    function resetAnalysisState() {
+        lastWasteDetails = null;
+        var allowWrap = document.getElementById('allowCollectWrap');
+        if (allowWrap) allowWrap.hidden = true;
+        var outputSection = document.getElementById('outputSection');
+        if (outputSection) outputSection.hidden = true;
+    }
 
     function handleFile(file) {
         var validTypes = ['image/jpeg', 'image/png', 'image/webp'];
@@ -209,6 +230,8 @@
             previewImg.src = dataUrl;
             uploadPreview.hidden = false;
             uploadZone.style.display = 'none';
+            // New image = previous analysis no longer applies.
+            resetAnalysisState();
         };
         reader.readAsDataURL(file);
     }
@@ -665,6 +688,11 @@
                 document.getElementById('wasteDetailsPanel').innerHTML =
                     '<div class="placeholder-text">Upload an image and click Analyze to see results</div>';
                 document.getElementById('outputSection').hidden = true;
+                // Invalid item: never allow listing it. Clear any prior analysis
+                // and hide the "Allow Public Collect" button.
+                lastWasteDetails = null;
+                var allowWrapRej = document.getElementById('allowCollectWrap');
+                if (allowWrapRej) allowWrapRej.hidden = true;
                 runAllBtn.disabled = false;
                 runAllBtn.textContent = '\ud83d\udd0d Analyze Waste';
                 return;
@@ -1061,10 +1089,13 @@
                 logoutBtn.className = 'btn-auth btn-login';
                 logoutBtn.textContent = 'Logout';
                 logoutBtn.addEventListener('click', function() {
-                    Auth.logout();
-                    clearUserState();
-                    navigate('');
-                    onAuthChanged();
+                    // Stop device pushes for this account first (needs the token).
+                    disablePush().then(function() {
+                        Auth.logout();
+                        clearUserState();
+                        navigate('');
+                        onAuthChanged();
+                    });
                 });
                 headerActions.appendChild(logoutBtn);
             }
@@ -1239,6 +1270,7 @@
     function onEnterProfile() {
         showProfileView();
         loadProfile();
+        if (typeof updatePushUI === 'function') updatePushUI();
     }
 
     function showProfileView() {
@@ -1378,10 +1410,12 @@
     });
 
     if (profileLogoutBtn) profileLogoutBtn.addEventListener('click', function() {
-        Auth.logout();
-        clearUserState();
-        navigate('');
-        onAuthChanged();
+        disablePush().then(function() {
+            Auth.logout();
+            clearUserState();
+            navigate('');
+            onAuthChanged();
+        });
     });
 
     // Delete account -> confirm modal -> DELETE
@@ -1397,7 +1431,11 @@
     });
     if (deleteConfirmBtn) deleteConfirmBtn.addEventListener('click', function() {
         deleteConfirmBtn.disabled = true;
-        profileFetch('DELETE').then(function() {
+        // Drop this device's push subscription (token still valid) before
+        // deleting the account, so no orphaned subscription keeps pushing.
+        disablePush().then(function() {
+            return profileFetch('DELETE');
+        }).then(function() {
             deleteConfirmBtn.disabled = false;
             deleteConfirmOverlay.classList.remove('show');
             Auth.logout();
@@ -1441,6 +1479,115 @@
             return resp.json();
         });
     }
+
+    // ===================== Web Push subscription =====================
+    function pushSupported() {
+        return ('serviceWorker' in navigator) && ('PushManager' in window) &&
+            ('Notification' in window) &&
+            VAPID_PUBLIC_KEY && VAPID_PUBLIC_KEY.indexOf('__VAPID_') !== 0;
+    }
+
+    function urlB64ToUint8Array(base64String) {
+        var padding = '='.repeat((4 - base64String.length % 4) % 4);
+        var base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        var raw = atob(base64);
+        var out = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+        return out;
+    }
+
+    // Reflect current push state in the profile Settings UI.
+    function updatePushUI() {
+        var btn = document.getElementById('enablePushBtn');
+        var status = document.getElementById('pushStatus');
+        var wrap = document.getElementById('pushOptin');
+        if (!btn || !wrap) return;
+        if (!pushSupported()) {
+            wrap.hidden = true;
+            return;
+        }
+        wrap.hidden = false;
+        if (Notification.permission === 'denied') {
+            btn.disabled = true;
+            btn.textContent = 'Blocked';
+            if (status) status.textContent = 'Notifications are blocked in your browser settings.';
+            return;
+        }
+        if (Notification.permission === 'granted') {
+            btn.disabled = false;
+            btn.textContent = 'Enabled';
+            if (status) status.textContent = 'You\'ll be notified on this device even when the app is closed.';
+            return;
+        }
+        btn.disabled = false;
+        btn.textContent = 'Enable';
+        if (status) status.textContent = 'Get notified on this device even when the app is closed.';
+    }
+
+    function enablePush() {
+        if (!pushSupported()) {
+            alert('Device notifications are not supported in this browser.');
+            return;
+        }
+        var btn = document.getElementById('enablePushBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Requesting...'; }
+
+        Notification.requestPermission().then(function(perm) {
+            if (perm !== 'granted') { updatePushUI(); return; }
+            return (_swRegistration ? Promise.resolve(_swRegistration)
+                                    : navigator.serviceWorker.ready)
+                .then(function(reg) {
+                    return reg.pushManager.getSubscription().then(function(existing) {
+                        if (existing) return existing;
+                        return reg.pushManager.subscribe({
+                            userVisibleOnly: true,
+                            applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY),
+                        });
+                    });
+                })
+                .then(function(sub) {
+                    return collectFetch('POST', { subscription: sub.toJSON() }, 'subscribe');
+                })
+                .then(function() { updatePushUI(); })
+                .catch(function(err) {
+                    console.warn('Push subscribe failed:', err);
+                    updatePushUI();
+                });
+        }).catch(function() { updatePushUI(); });
+    }
+
+    // Unsubscribe this device from Web Push and drop it from the backend.
+    // Called on logout / delete account so a logged-out user stops receiving
+    // device notifications. Best-effort: returns a promise that always resolves.
+    // When requireAuth is true the backend row is removed while the user is
+    // still authenticated (call this BEFORE Auth.logout()).
+    function disablePush() {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+            return Promise.resolve();
+        }
+        var ready = _swRegistration ? Promise.resolve(_swRegistration)
+                                    : navigator.serviceWorker.ready;
+        return ready.then(function(reg) {
+            if (!reg) return;
+            return reg.pushManager.getSubscription().then(function(sub) {
+                if (!sub) return;
+                var endpoint = sub.endpoint;
+                // Tell the backend to forget this device (needs a valid token,
+                // so this must run before the session is cleared).
+                var backend = collectFetch('POST', { endpoint: endpoint }, 'unsubscribe')
+                    .catch(function () {});
+                // Remove the browser-side subscription regardless.
+                var local = sub.unsubscribe().catch(function () {});
+                return Promise.all([backend, local]);
+            });
+        }).catch(function () {});
+    }
+    window.disablePush = disablePush;
+
+    (function wirePushButton() {
+        var btn = document.getElementById('enablePushBtn');
+        if (btn) btn.addEventListener('click', enablePush);
+    })();
 
     // Pull friendly values from the fixed waste-details JSON for the report.
     function wasteSummaryFromAnalysis() {
@@ -1501,11 +1648,26 @@
         e.preventDefault();
         hideEl('reportError'); hideEl('reportSuccess');
 
+        // Guard: never allow listing without a current valid analysis.
+        if (!lastWasteDetails) {
+            showMsg('reportError', 'Please analyze a valid waste item first.', true);
+            return;
+        }
+
         var name = document.getElementById('rfName').value.trim();
         var phone = document.getElementById('rfPhone').value.trim();
         var address = document.getElementById('rfAddress').value.trim();
         if (!name || !phone || !address) {
             showMsg('reportError', 'Name, phone, and pickup address are required.', true);
+            return;
+        }
+        // Basic phone sanity: 7-15 digits, optional leading + and spaces/dashes.
+        if (!/^\+?[0-9][0-9\s\-]{6,18}$/.test(phone)) {
+            showMsg('reportError', 'Please enter a valid phone number.', true);
+            return;
+        }
+        if (address.length < 5) {
+            showMsg('reportError', 'Please enter a complete pickup address.', true);
             return;
         }
 
@@ -1521,6 +1683,9 @@
             area: document.getElementById('rfArea').value.trim(),
             pickupTime: document.getElementById('rfPickup').value.trim(),
             notes: document.getElementById('rfNotes').value.trim(),
+            // Sent so the server can re-validate the image before listing.
+            file_data: fileData,
+            file_mime: fileMime,
         };
 
         reportSubmit.disabled = true;

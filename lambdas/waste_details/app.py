@@ -123,8 +123,9 @@ def validate_input(user_content):
         return "VALID" in reply
     except Exception as e:
         logger.error("Validation error: %s", str(e))
-        # If validation fails, allow through (fail open)
-        return True
+        # Fail closed: if we cannot validate, reject rather than risk letting
+        # inappropriate / non-waste content through.
+        return False
 
 
 @app.route("/", methods=["POST", "OPTIONS"], defaults={"path": ""})

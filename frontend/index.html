@@ -520,6 +520,13 @@ What would you like to know about waste disposal?</div>
                         <span>Show my contact to collectors</span>
                         <input type="checkbox" id="setShareContact">
                     </label>
+                    <div class="push-optin" id="pushOptin">
+                        <div class="push-optin-text">
+                            <span>Device notifications</span>
+                            <small id="pushStatus">Get notified on this device even when the app is closed.</small>
+                        </div>
+                        <button type="button" class="btn-profile-secondary" id="enablePushBtn">Enable</button>
+                    </div>
                 </section>
 
                 <!-- Rate & Feedback -->
@@ -627,6 +634,9 @@ What would you like to know about waste disposal?</div>
             realtime: '__APPSYNC_REALTIME__',
             apiKey: '__APPSYNC_API_KEY__',
         };
+
+        // Web Push VAPID public key (injected by CI/CD). Public — safe here.
+        var VAPID_PUBLIC_KEY = '__VAPID_PUBLIC_KEY__';
     </script>
     <script src="app.js"></script>
 </body>
