@@ -1,6 +1,6 @@
 # SmartWaste
 
-AI-powered waste analysis, disposal guidance, and a peer-to-peer waste collection platform. Upload a photo of any waste item to get instant identification, disposal steps, nearby recycling facilities on a map, environmental impact flash cards, and an AI chat assistant — then list the item for other users to collect, coordinate pickup via real-time chat, and track everything from a personal portal.
+AI-powered waste analysis, disposal guidance, and a verified-collector waste marketplace. Upload a photo of any waste item to get instant identification, disposal steps, nearby recycling facilities on a map, environmental impact flash cards, and an AI chat assistant — then either **give the item away free** for any user to collect, or list it as a **paid pickup** that a **verified collector business** quotes on and removes. Coordinate pickup via real-time chat and track everything from a personal portal.
 
 **Live:** https://d3f173je1qvblr.cloudfront.net
 
@@ -15,16 +15,40 @@ AI-powered waste analysis, disposal guidance, and a peer-to-peer waste collectio
 - **AI Chat Assistant** — floating chatbot for follow-up disposal questions (streamed responses).
 - **Content validation** — non-waste / inappropriate images are rejected (fails closed), both at analysis time and again server-side before an item can be listed.
 
-### Peer-to-peer waste collection (requires login)
+### Waste collection marketplace (requires login)
 - **Accounts** — real sign-up / email-verification / login via Amazon Cognito.
-- **Profile page** — view/edit name, phone, address, settings; rate & feedback; privacy & terms; logout; delete account (with confirmation).
-- **Allow Public Collect** — list an analyzed item for others to collect (details form, address kept private until approval).
+- **Profile page** — view/edit name, phone, address, settings; rate & feedback; privacy & terms; logout; delete account (with confirmation); **Become a collector** (apply for verified-business status).
+- **Two listing lanes** on *Allow Public Collect*:
+  - **Free giveaway** (`priceType: free`) — any logged-in user can collect it, no payment, no business verification.
+  - **Paid pickup** (`priceType: user_pays`, the default) — the owner sets an optional **max price** they'll pay for removal; only a **verified collector business** can quote on it.
+  - Any unrecognized price type falls back to the paid, business-gated lane (fail-safe — a bad value never accidentally opens the free lane).
+- **Quotes & selection** — on a paid listing, verified collectors submit a **quote** (amount ≤ the owner's max). A listing can hold **multiple competing quotes**; the owner compares them and accepts one. Accepting one auto-closes the losing quotes.
+- **Collector verification** — a business applies (name, registration number, waste-carrier license, service areas, waste categories, contact), uploads verification documents to a **private S3 bucket** (presigned upload), and submits for review. Status lifecycle: `draft → pending → approved → rejected / suspended`. Only an **approved** collector may quote on paid pickups.
+- **Admin verification queue** — an admin-only page (`#/admin/collectors`, gated by a Cognito `admins` group) lists pending collectors with their documents and **approves / rejects / suspends** them.
+- **Address stays private until the deal is confirmed** — see *Collection lifecycle & the "confirm" gate* below.
+- **Demo payment screen** — a paid pickup shows a mock "Pay" dialog at the confirm step. It is a **placeholder only — it moves no money and uses no payment processor** (the slot where the Phase 2 Stripe integration will go).
 - **Waste Collect Portal** — browse all open public listings with search + filters (type, date, distance), and a **History** tab split into *Posted* (your listings) and *Collected* (items you collected from others).
-- **Request lifecycle** — request → owner approves/rejects → address & contact unlock → mark collected → history, with a **Notifications** page driving approvals.
-- **Real-time chat** — approved owner/collector pairs chat via AWS AppSync Events (WebSocket), with an automatic polling fallback.
+- **Real-time chat** — owner/collector pairs chat via AWS AppSync Events (WebSocket), with an automatic polling fallback. Chat opens only after the deal is confirmed.
 - **Device push notifications** — opt-in **Web Push** (via a service worker + VAPID) delivers OS-level notifications for new collect requests, approvals, and chat messages **even when the tab or browser is closed** (like YouTube's web notifications).
 
-The app is a single-page app with hash-based routing (`#/profile`, `#/portal`, `#/chat`, `#/notifications`) so pages are bookmarkable and refresh-safe on a static host.
+The app is a single-page app with hash-based routing (`#/profile`, `#/portal`, `#/chat`, `#/notifications`, `#/admin/collectors`) so pages are bookmarkable and refresh-safe on a static host.
+
+### Collection lifecycle & the "confirm" gate
+
+The owner's contact details (full address, phone) and the chat channel unlock **only after the deal is confirmed** — never at mere request or acceptance. This "disintermediation gate" is what keeps the transaction on-platform.
+
+```
+list (owner)                 waste item: open
+  → quote (collector)        collect-request: requested      (paid: approved collectors only; free: any user)
+  → accept (owner)           collect-request: accepted       (owner picked one quote — NOTHING unlocks yet)
+  → confirm (owner)          collect-request: confirmed      ← FIRST unlock: address + phone + chat open;
+                             waste item:      collecting        paid lane shows the demo pay screen here;
+                                                                 other quotes auto-close
+  → mark done (either)       collect-request: collected
+                             waste item:      collected
+```
+
+Also: `rejected` / `cancelled` / `closed` / `disputed` are all **soft status changes — records are never deleted**. `cancel` and `dispute` keep the full history for audit. Unlock/chat are driven strictly server-side (`UNLOCK_STATUSES == CHAT_STATUSES == {confirmed, collected, disputed}`); the client never infers unlock on its own.
 
 ---
 
@@ -48,9 +72,12 @@ The app is a single-page app with hash-based routing (`#/profile`, `#/portal`, `
   Amazon Bedrock          Amazon Location          Amazon Cognito           Amazon DynamoDB
   (Claude Haiku 4.5)      (geo-places search,      (User Pool: accounts,    (users, feedback,
    image + text           map tiles via            email verification,      waste_requests,
-   analysis, chat,        browser API key)         JWT tokens)              collect_requests,
-   content validation)                                                      notifications, messages,
-                                                                            push_subscriptions)
+   analysis, chat,        browser API key)         JWT tokens; 'admins'     collect_requests,
+   content validation)                             group for verification;  notifications, messages,
+                                                   collectors derive type)  push_subscriptions,
+                                                                            collectors)
+
+          Amazon S3 (private CollectorDocsBucket — collector verification documents, presigned PUT/GET)
 
           AWS AppSync Events (real-time chat pub/sub, API-key auth)   •   Web Push (VAPID → browser push services)
 ```
@@ -61,14 +88,14 @@ The app is a single-page app with hash-based routing (`#/profile`, `#/portal`, `
 |---|---|
 | **Amazon Bedrock** (Claude Haiku 4.5, global inference profile) | Image + text waste analysis across all analysis Lambdas; chat assistant; content validation; waste-type enrichment; multilingual trading-search terms |
 | **AWS Lambda** (+ Lambda Web Adapter, Flask, Python 3.12) | All 7 backend functions, exposed via **Function URLs** (streamed for analysis/chat, buffered JSON for profile/collect/facilities) |
-| **Amazon Cognito** (User Pool + public app client) | User accounts, real email-verification sign-up, login, and the JWTs that authorize the profile/collect APIs |
-| **Amazon DynamoDB** (7 tables, PAY_PER_REQUEST) | `users`, `feedback`, `waste_requests` (+GSIs), `collect_requests` (+GSIs), `notifications`, `messages`, `push_subscriptions` |
+| **Amazon Cognito** (User Pool + public app client + `admins` group) | User accounts, real email-verification sign-up, login, and the JWTs that authorize the profile/collect APIs; the **`admins`** group gates the collector-verification admin routes (checked via the `cognito:groups` claim on the verified ID token — a newly-added admin must re-login for the claim to appear) |
+| **Amazon DynamoDB** (8 tables, PAY_PER_REQUEST) | `users`, `feedback`, `waste_requests` (+GSIs), `collect_requests` (+GSIs), `notifications`, `messages`, `push_subscriptions`, `collectors` (+`statusIndex` GSI — verified-business records; a user's account type is **derived** from this table rather than a Cognito custom attribute, to avoid a user-pool replacement) |
 | **Amazon Location Service** (geo-places + maps) | Server-side geocoding & POI search for nearby facilities (Lambda IAM role); browser map tiles via a scoped API key (MapLibre) |
-| **AWS AppSync Events** (+ ChannelNamespace + API key) | Real-time chat push between approved pairs (publish is JWT-authorized server-side; browser subscribes with the API key) |
+| **AWS AppSync Events** (+ ChannelNamespace + API key) | Real-time chat push between confirmed pairs (publish is JWT-authorized server-side; browser subscribes with the API key) |
 | **Web Push** (W3C Push API + VAPID, `pywebpush`) | OS-level device notifications for new requests, approvals, and chat messages while the tab/browser is closed; a service worker (`sw.js`) receives pushes, the `collect` Lambda signs them with the VAPID keypair and sends to each browser's push service |
-| **Amazon S3** | Static website hosting (frontend) |
+| **Amazon S3** | Static website hosting (frontend); a separate **private `CollectorDocsBucket`** (all public access blocked) holds collector verification documents, written/read via short-lived presigned URLs |
 | **Amazon CloudFront** | HTTPS + CDN caching in front of S3 |
-| **AWS IAM** | One shared Lambda execution role (Bedrock, geo-places, DynamoDB, Cognito admin, AppSync publish); a role for AppSync→CloudWatch logs |
+| **AWS IAM** | One shared Lambda execution role (Bedrock, geo-places, DynamoDB incl. `collectors`, Cognito admin, AppSync publish, presigned access to the private docs bucket); a role for AppSync→CloudWatch logs |
 | **Amazon CloudWatch** | Lambda logs + AppSync Events request logging |
 | **AWS SAM / CloudFormation** | Infrastructure as code (`infra/template.yaml`) |
 | **GitHub Actions** | CI/CD: SAM build/deploy, CORS config, URL/key injection, S3 sync, CloudFront invalidation |
@@ -76,7 +103,9 @@ The app is a single-page app with hash-based routing (`#/profile`, `#/portal`, `
 ### Auth model (how security works)
 - The browser only talks to **Lambda Function URLs** and sends the Cognito **ID token** as `Authorization: Bearer`.
 - The `profile` and `collect` Lambdas **verify the JWT themselves** (signature against the pool's JWKS, issuer, audience, expiry) and enforce per-user ownership / membership on every mutating route.
-- Addresses & phone numbers in listings stay **masked** in the public list and unlock only to the collector **after the owner approves**.
+- Addresses & phone numbers in listings stay **masked** in the public list and unlock to the collector only **after the deal is confirmed** (not at request or acceptance) — the on-platform "disintermediation gate." Chat opens at the same point.
+- **Admin routes** (`/admin/collectors/...`) require the `admins` group claim and are matched by a **prefix dispatcher that runs before** the suffix-matched route chain, so e.g. `/admin/collectors/{id}/approve` is never mis-routed to the request-approval handler.
+- **Collector verification documents** live in a private bucket and are only ever reachable through short-lived presigned URLs (uploads are constrained to an image/PDF content-type allow-list).
 - The map tile key is a browser-scoped Amazon Location key (tiles only); all Places search and chat publishing happen server-side via the Lambda role.
 
 ---
@@ -115,7 +144,11 @@ smartwaste-app/
 │   ├── nearby_facilities/         # Amazon Location search + trading platforms
 │   ├── smartwaste_assistant/      # AI chat assistant (streamed)
 │   ├── profile/                   # JWT-verified profile CRUD + feedback + delete account
-│   └── collect/                   # JWT-verified report/request/approve/reject/done + chat
+│   └── collect/                   # JWT-verified listings + quotes + lifecycle + chat
+│       │                          #   + collector verification + admin queue:
+│       │                          #   report/quote, approve/confirm/cancel/done/dispute,
+│       │                          #   /collector/apply|submit|upload-url|me,
+│       │                          #   /admin/collectors (list/approve/reject/suspend)
 │       └── (each: app.py, run.sh, requirements.txt)
 └── tests/
     ├── conftest.py                # stubs boto3/flask/jwt for pure-logic tests
@@ -211,23 +244,34 @@ Web Push is opt-in. While **logged in**, open **Profile → Settings** and click
 
 ## Running tests
 
-Unit tests cover the pure logic (JSON parsers, address masking, request-view unlocking, facility classification, distance/URL helpers) with AWS dependencies stubbed — no credentials or network needed.
+Unit tests cover the pure logic (JSON parsers, address masking, request-view unlocking, facility classification, distance/URL helpers) **plus the marketplace invariants** — quote validation and the max-price ceiling, the free-vs-paid lane rules, the `priceType` fail-safe default, the confirm-gate unlock statuses, the admin prefix-dispatch gate, and the upload content-type allow-list — all with AWS dependencies stubbed, so no credentials or network are needed.
 
 ```bash
 pip install -r requirements-dev.txt
 pytest
 ```
 
-> Scope: these are unit tests for pure functions. AWS integration paths (DynamoDB, live JWT verification, Bedrock), the end-to-end request lifecycle, and the frontend JS are not yet covered by automated tests.
+> Scope: these are unit tests for pure functions and the marketplace guard logic. Live AWS integration paths (DynamoDB, JWT verification against the pool, Bedrock, presigned-URL round-trips), the full end-to-end lifecycle, and the frontend JS are not yet covered by automated tests.
 
 ---
 
-## Request lifecycle (peer-to-peer collection)
+## Collection lifecycle
+
+See **[Collection lifecycle & the "confirm" gate](#collection-lifecycle--the-confirm-gate)** near the top for the full state machine. In short:
 
 ```
-report (owner lists item)        status: open
-  → collector requests           status: requested   → owner notified
-  → owner approves               status: collecting  → collector notified; address/contact unlock; chat enabled
-     owner rejects               status: open (reopened) → collector notified
-  → either marks done            status: collected   → both notified; moves to History
+list (owner)                     waste: open
+  → quote (collector)            collect-request: requested   → owner notified
+                                 (paid lane: approved collectors only; free lane: any user, no amount)
+  → accept (owner)               collect-request: accepted    → NOTHING unlocks yet
+  → confirm (owner)              collect-request: confirmed   → address/phone unlock, chat opens,
+                                 waste: collecting               losing quotes auto-close
+                                                                 (paid lane shows the demo pay screen)
+  → either marks done            collect-request: collected   → both notified; moves to History
 ```
+
+`reject` / `cancel` / `dispute` are **soft status changes — records are never deleted** (full history kept for audit).
+
+## Payments (Phase 2 — not yet live)
+
+Real money movement is **not implemented**. The paid lane carries a `paymentStatus` placeholder (`not_required`) and the confirm step shows a **demo mock payment screen** that charges nothing and calls no payment processor. That screen is the exact slot where an **Amazon-/Stripe-style payment authorization** will later go: authorize on confirm, capture on completion, platform commission as an application fee. Enabling it is gated on local legal review (collecting waste for payment and handling funds can be regulated) and real demand validation — the structure is in place so it becomes a configuration + integration step, not a rebuild.
