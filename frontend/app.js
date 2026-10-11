@@ -1712,6 +1712,10 @@
 
     // --- Portal page ---
     var portalRequests = { list: [], history: [] };
+    // Chart.js instances for the analytics dashboard — destroyed before
+    // re-creating so repeated History tab switches don't leak/double-render.
+    var lineChartInstance = null;
+    var pieChartInstance = null;
 
     // Router entry: portal view visible — arg is optional tab ('list'|'history').
     function onEnterPortal(which) {
@@ -1768,6 +1772,119 @@
         }).catch(function(err) {
             collectedEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
         });
+
+        loadAnalytics();
+    }
+
+    // Analytics dashboard: deterministic numbers computed server-side; here we
+    // just render stat cards, a line + pie chart, and two conic-gradient rings.
+    // Non-fatal: a failure leaves the History cards above fully working.
+    function loadAnalytics() {
+        var dash = document.getElementById('analyticsDash');
+        var empty = document.getElementById('analyticsEmpty');
+        if (!dash || !empty) return;
+
+        collectFetch('GET', null, 'analytics').then(function(data) {
+            data = data || {};
+            var total = data.totalCollected || 0;
+
+            // Empty/zero state: hide charts, show a friendly message.
+            if (total <= 0) {
+                dash.hidden = true;
+                empty.hidden = false;
+                destroyAnalyticsCharts();
+                return;
+            }
+            empty.hidden = true;
+            dash.hidden = false;
+
+            document.getElementById('statTotalCollected').textContent = total;
+            document.getElementById('statTotalWeight').textContent =
+                (data.totalWeightKg || 0) + ' kg';
+
+            // Circular widgets: set --pct and center text.
+            setRing('landfillSavedWidget', 'landfillSavedPct', data.landfillSavedPct || 0);
+            setRing('climateSavedWidget', 'climateSavedPct', data.climateSavedPct || 0);
+
+            renderAnalyticsCharts(data);
+        }).catch(function(err) {
+            // Non-fatal — surface a small inline note, keep History working.
+            dash.hidden = true;
+            empty.hidden = false;
+            empty.innerHTML = '<span class="error-message">\u26a0\ufe0f Analytics unavailable: ' +
+                escapeHtml(err.message) + '</span>';
+            destroyAnalyticsCharts();
+        });
+    }
+
+    function setRing(widgetId, pctId, pct) {
+        var w = document.getElementById(widgetId);
+        var label = document.getElementById(pctId);
+        var val = Math.max(0, Math.min(100, Math.round(pct)));
+        if (w) w.style.setProperty('--pct', val);
+        if (label) label.textContent = val + '%';
+    }
+
+    function destroyAnalyticsCharts() {
+        if (lineChartInstance) { lineChartInstance.destroy(); lineChartInstance = null; }
+        if (pieChartInstance) { pieChartInstance.destroy(); pieChartInstance = null; }
+    }
+
+    function renderAnalyticsCharts(data) {
+        // Guard: CDN not loaded (e.g. offline local preview) — skip charts but
+        // keep the stat cards and rings rendered.
+        if (typeof Chart === 'undefined') return;
+        destroyAnalyticsCharts();
+
+        var ts = data.timeSeries || { points: [] };
+        var points = ts.points || [];
+        var lineCanvas = document.getElementById('collectionLineChart');
+        if (lineCanvas) {
+            lineChartInstance = new Chart(lineCanvas, {
+                type: 'line',
+                data: {
+                    labels: points.map(function(p) { return p.label; }),
+                    datasets: [{
+                        label: 'Items collected',
+                        data: points.map(function(p) { return p.count; }),
+                        borderColor: '#2e7d32',
+                        backgroundColor: 'rgba(46, 125, 50, 0.12)',
+                        fill: true,
+                        tension: 0.3,
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+                },
+            });
+        }
+
+        var byType = data.byType || [];
+        var pieCanvas = document.getElementById('wasteTypePie');
+        if (pieCanvas) {
+            var palette = ['#2e7d32', '#43a047', '#66bb6a', '#26c6da',
+                           '#f0a84b', '#b85ccf', '#8e39ab', '#d9822b'];
+            pieChartInstance = new Chart(pieCanvas, {
+                type: 'pie',
+                data: {
+                    labels: byType.map(function(t) { return t.type; }),
+                    datasets: [{
+                        data: byType.map(function(t) { return t.count; }),
+                        backgroundColor: byType.map(function(_, i) {
+                            return palette[i % palette.length];
+                        }),
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'bottom' } },
+                },
+            });
+        }
     }
 
     // Collected items come from collect-requests, which have a slightly

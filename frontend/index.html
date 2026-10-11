@@ -15,6 +15,7 @@
     <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
             crossorigin="" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@6.3.12/dist/amazon-cognito-identity.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <header>
@@ -375,6 +376,57 @@ What would you like to know about waste disposal?</div>
                     <p class="history-subnote">Items you requested from others and collected.</p>
                     <div class="portal-cards" id="historyCollectedCards">
                         <div class="placeholder-text">Loading your collections...</div>
+                    </div>
+
+                    <!-- Analytics dashboard: summarizes the user's collected items -->
+                    <section class="analytics-dash" id="analyticsDash" hidden>
+                        <h3 class="history-subtitle"><i class="fa-solid fa-chart-line"></i> Collection Analytics</h3>
+                        <p class="history-subnote">Your impact from everything you've collected.</p>
+
+                        <div class="analytics-stats">
+                            <div class="analytics-stat">
+                                <span class="analytics-stat-value" id="statTotalCollected">0</span>
+                                <span class="analytics-stat-label">Items collected</span>
+                            </div>
+                            <div class="analytics-stat">
+                                <span class="analytics-stat-value" id="statTotalWeight">0 kg</span>
+                                <span class="analytics-stat-label">Estimated weight</span>
+                            </div>
+                        </div>
+
+                        <div class="analytics-charts">
+                            <div class="analytics-chart-card">
+                                <h4 class="analytics-chart-title">Collection over time</h4>
+                                <div class="analytics-chart-wrap">
+                                    <canvas id="collectionLineChart"></canvas>
+                                </div>
+                            </div>
+                            <div class="analytics-chart-card">
+                                <h4 class="analytics-chart-title">Waste types collected</h4>
+                                <div class="analytics-chart-wrap">
+                                    <canvas id="wasteTypePie"></canvas>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="analytics-rings">
+                            <div class="analytics-ring-card">
+                                <div class="analytics-ring" id="landfillSavedWidget" style="--pct: 0">
+                                    <span class="analytics-ring-pct" id="landfillSavedPct">0%</span>
+                                </div>
+                                <span class="analytics-ring-label">Landfill saved</span>
+                            </div>
+                            <div class="analytics-ring-card">
+                                <div class="analytics-ring" id="climateSavedWidget" style="--pct: 0">
+                                    <span class="analytics-ring-pct" id="climateSavedPct">0%</span>
+                                </div>
+                                <span class="analytics-ring-label">Climate gas saved</span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <div class="analytics-empty placeholder-text" id="analyticsEmpty" hidden>
+                        Collect your first item to unlock your impact dashboard.
                     </div>
                 </div>
             </div>

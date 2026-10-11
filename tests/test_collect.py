@@ -74,3 +74,65 @@ def test_json_default_decimal():
     from decimal import Decimal
     assert app._json_default(Decimal("5")) == 5
     assert app._json_default(Decimal("1.5")) == 1.5
+
+
+# --- Analytics: weight parser (pure, no AWS) ---
+def test_parse_weight_kg():
+    assert app.parse_weight_kg("2kg") == 2.0
+    assert app.parse_weight_kg("500 g") == 0.5
+    assert app.parse_weight_kg("approx 2 kg") == 2.0
+    assert app.parse_weight_kg("") == 1.0
+    assert app.parse_weight_kg("heavy") == 1.0  # junk -> default
+    assert app.parse_weight_kg("-3 kg") == 1.0  # absurd -> default
+    assert app.parse_weight_kg("1.5") == 1.5    # no unit -> assume kg
+
+
+# --- Analytics: category normalization + static factors (no AI) ---
+def test_normalize_category_synonyms():
+    assert app.normalize_category("Plastic bottles") == "plastic"
+    assert app.normalize_category("Cardboard box") == "paper"
+    assert app.normalize_category("Aluminium cans") == "metal"
+    assert app.normalize_category("Food scraps") == "organic"
+    assert app.normalize_category("Old laptop", "electronics") == "ewaste"
+    assert app.normalize_category("", "glass jar") == "glass"
+    assert app.normalize_category("mystery goo") == "general"
+    assert app.normalize_category("", "") == "general"
+
+
+def test_factor_for_known_types_no_ai():
+    # Known types resolve from the static table synchronously (no AWS call).
+    assert app.factor_for("Plastic") == app.IMPACT_FACTORS["plastic"]
+    assert app.factor_for("", "metal") == app.IMPACT_FACTORS["metal"]
+    # Empty type returns the general default without consulting Bedrock.
+    assert app.factor_for("") == app.IMPACT_FACTORS["general"]
+
+
+# --- Analytics: time-series bucketing (pure) ---
+def test_bucket_timeseries_monthly_chronological():
+    # completedAt is epoch seconds. Two in May, one in April 2024.
+    items = [
+        {"completedAt": 1714000000, "weight": "2kg"},   # 2024-04
+        {"completedAt": 1715000000, "weight": "1kg"},   # 2024-05
+        {"completedAt": 1715500000, "weight": "500 g"},  # 2024-05
+    ]
+    ts = app.bucket_timeseries(items)
+    assert ts["granularity"] == "month"
+    labels = [p["label"] for p in ts["points"]]
+    assert labels == sorted(labels)  # chronological
+    assert labels[0] == "2024-04"
+    # The May bucket aggregates two items.
+    may = [p for p in ts["points"] if p["label"] == "2024-05"][0]
+    assert may["count"] == 2
+
+
+def test_bucket_timeseries_year_granularity_when_span_large():
+    # Span > 18 months -> switch to yearly granularity.
+    items = [
+        {"completedAt": 1577880000, "weight": "1kg"},   # 2020-01
+        {"completedAt": 1704110400, "weight": "1kg"},   # 2024-01
+    ]
+    ts = app.bucket_timeseries(items)
+    assert ts["granularity"] == "year"
+    labels = [p["label"] for p in ts["points"]]
+    assert labels == sorted(labels)
+    assert "2020" in labels and "2024" in labels

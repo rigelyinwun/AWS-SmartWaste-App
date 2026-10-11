@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import time
 import traceback
 import urllib.request
@@ -153,6 +154,298 @@ def _json_default(o):
 
 def _s(v):
     return str(v).strip() if v is not None else ""
+
+
+# ------------------- Analytics (manual deterministic calc) -------------------
+# Static per-waste-type impact factors. Numbers are reasonable, citable
+# real-world approximations (not exact for any one jurisdiction):
+#   landfill_divert: 0-1 fraction of this material's mass considered diverted
+#                    from landfill when collected/recycled.
+#   co2e_per_kg:     kg CO2e avoided per kg diverted vs landfilling.
+# Sources (approx): US EPA WARM model (recycling vs landfill emission factors)
+# and WRAP textile estimates. Values are intentionally conservative blends.
+IMPACT_FACTORS = {
+    # key:        (landfill_divert, co2e_per_kg)
+    "plastic":    (0.90, 1.5),   # EPA WARM: mixed plastics ~1-2 kg CO2e/kg avoided.
+    "paper":      (0.85, 0.9),   # EPA WARM: paper/cardboard ~0.8-1.0 kg CO2e/kg.
+    "glass":      (0.95, 0.3),   # EPA WARM: glass ~0.3 kg CO2e/kg; inert, divertible.
+    "metal":      (0.95, 4.0),   # EPA WARM: aluminium/steel ~4-9 kg CO2e/kg; blended 4.0.
+    "organic":    (0.80, 0.5),   # EPA WARM: composting avoids ~0.5 kg CO2e/kg methane.
+    "ewaste":     (0.70, 2.0),   # EPA/industry: e-waste recovery ~2 kg CO2e/kg.
+    "textile":    (0.75, 3.0),   # WRAP: textile reuse/recycling ~3 kg CO2e/kg.
+    "general":    (0.50, 0.6),   # Fallback for mixed/unmatched waste.
+}
+
+# Approximate average landfill emission for mixed MSW, used only to normalize
+# the climate-saved percentage into a sensible 0-100 band (brief source: EPA
+# estimates landfilled mixed waste emits on the order of ~1 kg CO2e/kg over time).
+LANDFILL_BASELINE_CO2E_PER_KG = 1.0
+
+# Synonyms -> canonical key. Checked as case-insensitive substring matches.
+_CATEGORY_SYNONYMS = [
+    (("plastic", "pet", "hdpe", "bottle"), "plastic"),
+    (("cardboard", "carton", "paper"), "paper"),
+    (("glass", "jar"), "glass"),
+    (("aluminium", "aluminum", "steel", "tin", "can", "metal"), "metal"),
+    (("food", "compost", "garden", "organic"), "organic"),
+    (("electronic", "electronics", "e-waste", "ewaste", "battery", "device"), "ewaste"),
+    (("cloth", "clothing", "fabric", "textile"), "textile"),
+]
+
+# Warm-Lambda cache for AI-estimated factors of unknown types (keyed by the
+# lowercased raw type string). Pure helpers never populate this.
+_ai_factor_cache = {}
+
+
+def parse_weight_kg(text):
+    """Best-effort kilograms from a free-text weight string.
+
+    "2kg"->2.0, "500 g"->0.5, "approx 2 kg"->2.0, ""/junk->1.0 default.
+    Pure function (no AWS); robust against missing/absurd values.
+    """
+    s = _s(text).lower()
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    if not m:
+        return 1.0
+    try:
+        value = float(m.group(0))
+    except ValueError:
+        return 1.0
+    # Determine unit from the text after the matched number.
+    tail = s[m.end():]
+    if "kg" in tail:
+        pass  # already kilograms
+    elif re.search(r"\bg\b|gram", tail):
+        value = value / 1000.0  # grams -> kg
+    # else: no recognizable unit -> assume kilograms.
+    if value <= 0:
+        return 1.0
+    return value
+
+
+def normalize_category(category, waste_type=""):
+    """Map a free-text category (then wasteType) to a canonical IMPACT_FACTORS
+    key via case-insensitive substring synonyms. Unmatched -> 'general'. Pure."""
+    hay = (_s(category) + " " + _s(waste_type)).lower()
+    if not hay.strip():
+        return "general"
+    for needles, key in _CATEGORY_SYNONYMS:
+        for n in needles:
+            if n in hay:
+                return key
+    return "general"
+
+
+def factor_for(category, waste_type=""):
+    """Return (landfill_divert, co2e_per_kg) for an item.
+
+    Known types resolve from the static table synchronously. Only a non-empty
+    type that normalizes to 'general' may consult Bedrock as a FALLBACK to
+    estimate factors; the result is cached in-process. Any error, unparseable
+    reply, or out-of-range value fails CLOSED to the 'general' default. This
+    never raises and never runs for known types.
+    """
+    key = normalize_category(category, waste_type)
+    if key != "general":
+        return IMPACT_FACTORS[key]
+
+    raw = (_s(category) or _s(waste_type)).lower()
+    if not raw:
+        return IMPACT_FACTORS["general"]
+    if raw in _ai_factor_cache:
+        return _ai_factor_cache[raw]
+
+    default = IMPACT_FACTORS["general"]
+    try:
+        prompt = (
+            "You estimate waste recycling impact factors. For the waste type "
+            "below, reply with ONLY strict JSON of the form "
+            '{"landfill_divert": <0-1>, "co2e_per_kg": <number>} where '
+            "landfill_divert is the fraction (0-1) of mass diverted from landfill "
+            "when recycled and co2e_per_kg is kg CO2e avoided per kg. No prose.\n"
+            "Waste type: " + raw[:80]
+        )
+        body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 60,
+            "temperature": 0,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+        }
+        resp = bedrock.invoke_model(
+            modelId=VALIDATION_MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(body),
+        )
+        result = json.loads(resp["body"].read())
+        reply = result.get("content", [{}])[0].get("text", "")
+        match = re.search(r"\{.*\}", reply, re.DOTALL)
+        data = json.loads(match.group(0)) if match else {}
+        divert = float(data["landfill_divert"])
+        co2e = float(data["co2e_per_kg"])
+        if not (0.0 <= divert <= 1.0) or co2e < 0:
+            raise ValueError("factor out of range")
+        parsed = (divert, co2e)
+        _ai_factor_cache[raw] = parsed
+        return parsed
+    except Exception as e:  # fail closed to the general/other default.
+        logger.warning("factor_for AI fallback failed for %r: %s", raw, str(e))
+        return default
+
+
+def _item_epoch_seconds(item):
+    """Normalize a timestamp to epoch SECONDS. completedAt is seconds; createdAt
+    on collect-requests is microseconds (_now_micros). Treat values > 10^12 as
+    microseconds."""
+    ts = item.get("completedAt")
+    if ts is None:
+        ts = item.get("createdAt")
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        return None
+    if ts > 1_000_000_000_000:  # microseconds -> seconds
+        ts = ts // 1_000_000
+    return ts
+
+
+def bucket_timeseries(items):
+    """Group items into chronological {label,count,weightKg} points.
+
+    Default monthly (YYYY-MM) buckets; switch to yearly (YYYY) when the span
+    exceeds ~18 months. Pure function (uses only item timestamps + weight)."""
+    buckets_month = {}
+    for it in items:
+        ts = _item_epoch_seconds(it)
+        if ts is None:
+            continue
+        tm = time.gmtime(ts)
+        label = "%04d-%02d" % (tm.tm_year, tm.tm_mon)
+        b = buckets_month.setdefault(label, {"count": 0, "weightKg": 0.0})
+        b["count"] += 1
+        b["weightKg"] += parse_weight_kg(it.get("weight"))
+
+    if not buckets_month:
+        return {"granularity": "month", "points": []}
+
+    labels = sorted(buckets_month.keys())
+    # Span in months between earliest and latest bucket.
+    def _ym(lbl):
+        y, m = lbl.split("-")
+        return int(y) * 12 + int(m)
+    span_months = _ym(labels[-1]) - _ym(labels[0])
+
+    if span_months > 18:
+        buckets_year = {}
+        for lbl, b in buckets_month.items():
+            yr = lbl.split("-")[0]
+            yb = buckets_year.setdefault(yr, {"count": 0, "weightKg": 0.0})
+            yb["count"] += b["count"]
+            yb["weightKg"] += b["weightKg"]
+        points = [
+            {"label": yr, "count": buckets_year[yr]["count"],
+             "weightKg": round(buckets_year[yr]["weightKg"], 2)}
+            for yr in sorted(buckets_year.keys())
+        ]
+        return {"granularity": "year", "points": points}
+
+    points = [
+        {"label": lbl, "count": buckets_month[lbl]["count"],
+         "weightKg": round(buckets_month[lbl]["weightKg"], 2)}
+        for lbl in labels
+    ]
+    return {"granularity": "month", "points": points}
+
+
+def _empty_analytics():
+    return {
+        "totalCollected": 0,
+        "totalWeightKg": 0.0,
+        "timeSeries": {"granularity": "month", "points": []},
+        "byType": [],
+        "landfillSavedPct": 0.0,
+        "climateSavedPct": 0.0,
+        "co2eSavedKg": 0.0,
+        "landfillDivertedKg": 0.0,
+    }
+
+
+def get_analytics(claims):
+    """Summarize the current user's COLLECTED outgoing collect-requests.
+
+    Reuses the list_requests collector-index query (read only). Returns the
+    all-zero shape on any DynamoDB error rather than a 500 (defensive style)."""
+    if not creq_table:
+        return _empty_analytics()
+    me = claims["sub"]
+    try:
+        resp = creq_table.query(
+            IndexName="collectorIndex",
+            KeyConditionExpression=Key("collectorId").eq(me),
+            Limit=1000,
+        )
+        rows = resp.get("Items", [])
+    except Exception as e:
+        logger.error("get_analytics query error: %s", str(e))
+        return _empty_analytics()
+
+    collected = [r for r in rows if r.get("status") == "collected"]
+    if not collected:
+        return _empty_analytics()
+
+    total_weight = 0.0
+    diverted = 0.0        # Σ weight * landfill_divert
+    co2e_saved = 0.0      # Σ weight * co2e_per_kg
+    by_type = {}          # display label -> {count, weightKg}
+
+    for it in collected:
+        w = parse_weight_kg(it.get("weight"))
+        divert, co2e = factor_for(it.get("category"), it.get("wasteType"))
+        total_weight += w
+        diverted += w * divert
+        co2e_saved += w * co2e
+        # Human-facing label uses the item's category (fallback wasteType).
+        label = _s(it.get("category")) or _s(it.get("wasteType")) or "Other"
+        bt = by_type.setdefault(label, {"count": 0, "weightKg": 0.0})
+        bt["count"] += 1
+        bt["weightKg"] += w
+
+    # landfillSavedPct = weighted share of collected mass kept out of landfill.
+    #   100 * diverted / total_weight ; 0 when no weight. Clamp 0-100.
+    if total_weight > 0:
+        landfill_pct = 100.0 * diverted / total_weight
+    else:
+        landfill_pct = 0.0
+    landfill_pct = min(100.0, max(0.0, landfill_pct))
+
+    # climateSavedPct = avoided emissions as a share of (avoided + would-be
+    #   landfill emissions): 100 * co2e_saved / (co2e_saved + baseline), where
+    #   baseline = total_weight * LANDFILL_BASELINE_CO2E_PER_KG. 0 when no
+    #   weight; never divides by zero. Clamp 0-100.
+    baseline = total_weight * LANDFILL_BASELINE_CO2E_PER_KG
+    denom = co2e_saved + baseline
+    if denom > 0:
+        climate_pct = 100.0 * co2e_saved / denom
+    else:
+        climate_pct = 0.0
+    climate_pct = min(100.0, max(0.0, climate_pct))
+
+    by_type_list = sorted(
+        ({"type": k, "count": v["count"], "weightKg": round(v["weightKg"], 2)}
+         for k, v in by_type.items()),
+        key=lambda x: x["count"], reverse=True,
+    )
+
+    return {
+        "totalCollected": len(collected),
+        "totalWeightKg": round(total_weight, 2),
+        "timeSeries": bucket_timeseries(collected),
+        "byType": by_type_list,
+        "landfillSavedPct": round(landfill_pct, 1),
+        "climateSavedPct": round(climate_pct, 1),
+        "co2eSavedKg": round(co2e_saved, 2),
+        "landfillDivertedKg": round(diverted, 2),
+    }
 
 
 REPORT_REJECTION = ("This item could not be verified as valid waste and was not "
@@ -853,6 +1146,8 @@ def handler(path):
         if route.endswith("messages"):
             cr_id = request.args.get("cr", "")
             return _unwrap(get_messages(claims, cr_id))
+        if route.endswith("analytics"):
+            return _unwrap(get_analytics(claims))
         return _unwrap(list_public(claims))  # /list or root
 
     except Exception as e:
