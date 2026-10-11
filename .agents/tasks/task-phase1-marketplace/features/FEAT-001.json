@@ -1,0 +1,30 @@
+{
+  "id": "FEAT-001",
+  "type": "chore",
+  "description": "Infra (infra/template.yaml): add the CollectorsTable DynamoDB table (+statusIndex GSI), the private CollectorDocsBucket S3 bucket (CORS, all public access blocked, NO bucket policy), the AdminsGroup Cognito user-pool group, the shared-role IAM grants, the CollectFunction env vars, and the docs-bucket output. Foundational and INDEPENDENT of the other FEATs (no code depends on these at import time), but ordered first because FEAT-003's collector/admin code references the COLLECTORS_TABLE / COLLECTOR_DOCS_BUCKET env vars these create. No Cognito custom attribute (would replace the pool). Follow the existing template patterns exactly.",
+  "status": "completed",
+  "steps": [
+    "Add CollectorsTable (AWS::DynamoDB::Table, BillingMode PAY_PER_REQUEST, TableName !Sub 'smartwaste-collectors-${AWS::StackName}') in infra/template.yaml near the other DynamoDB tables: PK userId (S); AttributeDefinitions userId(S), status(S), createdAt(N); GSI statusIndex HASH status + RANGE createdAt, ProjectionType ALL. Mirror the existing WasteRequestsTable.statusIndex shape exactly.",
+    "Add CollectorDocsBucket (AWS::S3::Bucket): PublicAccessBlockConfiguration with all four flags true; NO bucket policy (contrast FrontendBucket which has a public s3:GetObject policy); CorsConfiguration with one CorsRule: AllowedOrigins ['*'] (Phase-1 wildcard — add a YAML comment that it is tightened to the website origin before real docs are stored), AllowedMethods ['PUT','GET'], AllowedHeaders ['*'], MaxAge 3000; no ExposeHeaders.",
+    "Add AdminsGroup (AWS::Cognito::UserPoolGroup): GroupName admins, UserPoolId !Ref UserPool, a Description. Do NOT modify the UserPool resource and do NOT add any Cognito custom attribute.",
+    "Extend the SHARED AppBedrockRole: in the existing CollectDataPolicy add !GetAtt CollectorsTable.Arn and !Sub '${CollectorsTable.Arn}/index/*' to the Dynamo Resource list; add a NEW inline policy CollectorDocsPolicy granting s3:PutObject + s3:GetObject on !Sub '${CollectorDocsBucket.Arn}/*'. Do NOT create a per-function role — the role is shared by ProfileFunction and CollectFunction; profile inheriting the unused perms is harmless.",
+    "Add env vars to CollectFunction: COLLECTORS_TABLE !Ref CollectorsTable and COLLECTOR_DOCS_BUCKET !Ref CollectorDocsBucket. Leave ProfileFunction unchanged.",
+    "Add Output CollectorDocsBucketName !Ref CollectorDocsBucket (mirror the existing BucketName output).",
+    "Add a one-line YAML comment that CollectorDocsBucket lives in the stack REGION, matching the boto3 S3 client region so SigV4 presign host/region line up."
+  ],
+  "acceptance_criteria": [
+    "infra/template.yaml contains CollectorsTable with PK userId and a statusIndex GSI (HASH status, RANGE createdAt, ProjectionType ALL).",
+    "CollectorDocsBucket exists with all PublicAccessBlockConfiguration flags true, a PUT/GET CORS rule, and NO bucket policy.",
+    "AdminsGroup (AWS::Cognito::UserPoolGroup, GroupName admins) exists and the UserPool resource is unchanged.",
+    "AppBedrockRole grants CollectorsTable (+index/*) in CollectDataPolicy and has a CollectorDocsPolicy for s3:PutObject/s3:GetObject on the docs bucket; no new per-function role was created.",
+    "CollectFunction has COLLECTORS_TABLE and COLLECTOR_DOCS_BUCKET env vars; the CollectorDocsBucketName output is present.",
+    "Existing pytest suite still passes (infra edits do not affect it)."
+  ],
+  "verification": [
+    "If the SAM CLI is available: run 'sam validate --template infra/template.yaml --region ap-southeast-1' from the worktree root and confirm it reports the template is valid.",
+    "If SAM is unavailable: re-read the edited sections of infra/template.yaml and confirm the four resources, the two env vars, and the output are present and well-formed (CFN intrinsics make a plain yaml.safe_load fail, which is expected — do NOT treat that as a failure).",
+    "From the worktree root run 'pytest -q' and confirm all existing unit tests still pass."
+  ],
+  "blocked_reason": null,
+  "findings": "Exact logical IDs added to infra/template.yaml for later FEATs: DynamoDB table CollectorsTable (PK userId:S; GSI 'statusIndex' HASH status:S / RANGE createdAt:N, ProjectionType ALL; BillingMode PAY_PER_REQUEST; TableName smartwaste-collectors-${AWS::StackName}). Private S3 bucket CollectorDocsBucket (all 4 PublicAccessBlock flags true, no bucket policy, CORS PUT/GET wildcard origin, MaxAge 3000). Cognito group AdminsGroup (GroupName 'admins' on !Ref UserPool). CollectFunction env vars added: COLLECTORS_TABLE=!Ref CollectorsTable, COLLECTOR_DOCS_BUCKET=!Ref CollectorDocsBucket — backend code should read os.environ['COLLECTORS_TABLE'] and os.environ['COLLECTOR_DOCS_BUCKET']. IAM: shared AppBedrockRole's CollectDataPolicy now includes CollectorsTable.Arn + index/*; new inline policy CollectorDocsPolicy grants s3:PutObject/s3:GetObject on ${CollectorDocsBucket.Arn}/*. Output CollectorDocsBucketName=!Ref CollectorDocsBucket. UserPool resource untouched; no Cognito custom attribute; no per-function role. Verification: SAM CLI not installed in env (sam validate not run); pytest -q passed (all existing tests green); edited sections re-read and confirmed well-formed."
+}

@@ -83,6 +83,14 @@ Resources:
         IdToken: hours
         RefreshToken: days
 
+  # Cognito group whose members gain admin access in the app.
+  AdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admins
+      UserPoolId: !Ref UserPool
+      Description: SmartWaste administrators (collector approvals, dispute handling)
+
   # IAM Role for all Lambda functions
   AppBedrockRole:
     Type: AWS::IAM::Role
@@ -162,6 +170,18 @@ Resources:
                   - !Sub "${MessagesTable.Arn}/index/*"
                   - !GetAtt PushSubscriptionsTable.Arn
                   - !Sub "${PushSubscriptionsTable.Arn}/index/*"
+                  - !GetAtt CollectorsTable.Arn
+                  - !Sub "${CollectorsTable.Arn}/index/*"
+        - PolicyName: CollectorDocsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource:
+                  - !Sub "${CollectorDocsBucket.Arn}/*"
         - PolicyName: ChatPublishPolicy
           PolicyDocument:
             Version: "2012-10-17"
@@ -331,6 +351,32 @@ Resources:
         - AttributeName: endpoint
           KeyType: RANGE
 
+  # Collector business accounts (one row per registered collector)
+  CollectorsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "smartwaste-collectors-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: N
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: statusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
   # --- AppSync Events: real-time chat push ---
   ChatEventApi:
     Type: AWS::AppSync::Api
@@ -413,6 +459,8 @@ Resources:
           DEPLOY_TS: !Ref DeployTimestamp
           WASTE_REQUESTS_TABLE: !Ref WasteRequestsTable
           COLLECT_REQUESTS_TABLE: !Ref CollectRequestsTable
+          COLLECTORS_TABLE: !Ref CollectorsTable
+          COLLECTOR_DOCS_BUCKET: !Ref CollectorDocsBucket
           NOTIFICATIONS_TABLE: !Ref NotificationsTable
           MESSAGES_TABLE: !Ref MessagesTable
           PUSH_SUBS_TABLE: !Ref PushSubscriptionsTable
@@ -532,6 +580,29 @@ Resources:
         IgnorePublicAcls: false
         RestrictPublicBuckets: false
 
+  # Private bucket for collector verification documents (presigned PUT/GET only).
+  # Lives in the stack REGION, matching the boto3 S3 client region so SigV4
+  # presign host/region line up.
+  CollectorDocsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          # Phase-1 wildcard origin — tighten to the website origin before real docs are stored.
+          - AllowedOrigins:
+              - "*"
+            AllowedMethods:
+              - PUT
+              - GET
+            AllowedHeaders:
+              - "*"
+            MaxAge: 3000
+
   FrontendBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -576,3 +647,5 @@ Outputs:
     Value: !GetAtt FrontendBucket.WebsiteURL
   BucketName:
     Value: !Ref FrontendBucket
+  CollectorDocsBucketName:
+    Value: !Ref CollectorDocsBucket
