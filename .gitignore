@@ -11,3 +11,8 @@ node_modules/
 venv/
 .pytest_cache/
 .DS_Store
+# Git worktrees (local only)
+.worktrees/
+
+# Agent workflow artifacts (local planning docs)
+.agents/
