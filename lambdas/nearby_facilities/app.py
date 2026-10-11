@@ -290,54 +290,26 @@ def enrich_waste_types(item_description, facility_names):
     return {}
 
 
-# Curated allowlist of real platforms with search-URL templates ({q} = url-encoded
-# query). Building search URLs (not deep links) guarantees every link resolves to
-# live listings on a real domain — "Google-search valid".
-TRADING_PLATFORMS = {
-    "carousell": {"name": "Carousell", "type": "Marketplace",
-                  "tmpl": "https://www.carousell.com.my/search/{q}"},
-    "facebook": {"name": "Facebook Marketplace", "type": "Social Media",
-                 "tmpl": "https://www.facebook.com/marketplace/search/?query={q}"},
-    "mudah": {"name": "Mudah.my", "type": "Marketplace",
-              "tmpl": "https://www.mudah.my/malaysia/all?q={q}"},
-    "shopee": {"name": "Shopee", "type": "Marketplace",
-               "tmpl": "https://shopee.com.my/search?keyword={q}"},
-    "lazada": {"name": "Lazada", "type": "Marketplace",
-               "tmpl": "https://www.lazada.com.my/catalog/?q={q}"},
-    "ebay": {"name": "eBay", "type": "Marketplace",
-             "tmpl": "https://www.ebay.com/sch/i.html?_nkw={q}"},
-    "lelong": {"name": "Lelong.my", "type": "Marketplace",
-               "tmpl": "https://www.lelong.com.my/catalog/all/list?TheKeyword={q}"},
-    "freecycle": {"name": "Freecycle", "type": "Donation",
-                  "tmpl": "https://www.freecycle.org/search?query={q}"},
-    "reddit": {"name": "Reddit (r/malaysia, hobby subs)", "type": "Social Media",
-               "tmpl": "https://www.reddit.com/search/?q={q}"},
-    "google_shopping": {"name": "Google (shopping & local)", "type": "Specialist",
-                        "tmpl": "https://www.google.com/search?q={q}"},
-}
-
-DEFAULT_PLATFORM_KEYS = ["carousell", "facebook", "mudah", "shopee", "ebay"]
+def _google_url(query):
+    """A plain Google search URL for the given query string."""
+    return "https://www.google.com/search?q=" + urllib.parse.quote(query)
 
 
-def _pick_platforms_and_terms(item_description):
-    """Ask Bedrock which allowlisted platforms fit the item and for multilingual
-    search terms (English, Chinese, Malay). Returns (platform_keys, terms_dict)."""
-    keys = list(TRADING_PLATFORMS.keys())
+def _pick_search_terms(item_description):
+    """Ask Bedrock for concise multilingual search terms (English, Chinese, Malay)
+    describing the item for second-hand trading. Returns a terms dict."""
     system = (
-        "You help resell/donate/trade a second-hand item online in Malaysia. "
-        "Respond with ONLY a JSON object (no markdown): "
-        '{"platforms": [keys...], "terms": {"en": "...", "zh": "...", "ms": "..."}}. '
-        "Choose 3-5 platform keys ONLY from this exact list: " + ", ".join(keys) + ". "
-        "Pick the ones most suitable for this item (specialist/hobby items favor "
-        "Facebook, eBay, Reddit; common goods favor Carousell, Mudah, Shopee). "
-        "'terms' are concise search phrases for the item in English (en), "
-        "Simplified Chinese (zh), and Malay (ms) — e.g. for vinyl records: "
-        '"vinyl records", "黑胶唱片", "rekod vinil".'
+        "You create concise search phrases to find second-hand buyers/sellers of an "
+        "item online (Malaysia context). Respond with ONLY a JSON object (no markdown): "
+        '{"en": "...", "zh": "...", "ms": "..."}. '
+        "Each value is a short phrase describing the item for resale/trade, e.g. for "
+        'vinyl records: {"en": "used vinyl records", "zh": "二手黑胶唱片", "ms": "rekod vinil terpakai"}. '
+        "Keep each phrase under 6 words. No commas, no lists — one phrase per language."
     )
     user = "Item: " + (item_description or "general reusable household item")
     body = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 512,
+        "max_tokens": 300,
         "temperature": 0.2,
         "system": system,
         "messages": [{"role": "user", "content": [{"type": "text", "text": user}]}],
@@ -359,41 +331,59 @@ def _pick_platforms_and_terms(item_description):
         start, end = text.find("{"), text.rfind("}")
         if start != -1 and end != -1:
             obj = json.loads(text[start:end + 1])
-            chosen = [k for k in (obj.get("platforms") or []) if k in TRADING_PLATFORMS]
-            terms = obj.get("terms") or {}
             terms = {
-                "en": str(terms.get("en") or "").strip(),
-                "zh": str(terms.get("zh") or "").strip(),
-                "ms": str(terms.get("ms") or "").strip(),
+                "en": str(obj.get("en") or "").strip(),
+                "zh": str(obj.get("zh") or "").strip(),
+                "ms": str(obj.get("ms") or "").strip(),
             }
-            if chosen and (terms["en"] or terms["zh"] or terms["ms"]):
-                return chosen[:5], terms
+            if terms["en"] or terms["zh"] or terms["ms"]:
+                return terms
     except Exception as e:
-        logger.error("Platform/terms selection error: %s", str(e))
-    # Fallback: default platforms, English term from the description.
-    return DEFAULT_PLATFORM_KEYS, {"en": (item_description or "").strip(), "zh": "", "ms": ""}
+        logger.error("Search-term generation error: %s", str(e))
+    return {"en": (item_description or "second hand item").strip(), "zh": "", "ms": ""}
 
 
 def generate_trading_platforms(item_description):
-    """Build reliable second-hand trading links: real platforms (allowlist) with
-    multilingual search URLs. Returns [{name, type, queries:[{lang,term,url}]}]."""
-    keys, terms = _pick_platforms_and_terms(item_description)
+    """Build reliable Google search links to find second-hand buyers/sellers and
+    discussion groups for the item. Google always returns results (unlike strict
+    marketplace searches) and surfaces listings, Facebook groups, forums, etc.
+    Returns [{name, type, queries:[{lang,term,url}]}]."""
+    terms = _pick_search_terms(item_description)
     lang_labels = {"en": "EN", "zh": "中文", "ms": "BM"}
-    # Keep languages that produced a term; always ensure at least English.
-    active_terms = [(lang, terms[lang]) for lang in ("en", "zh", "ms") if terms.get(lang)]
-    if not active_terms:
-        active_terms = [("en", (item_description or "second hand item").strip())]
+    active = [(lang, terms[lang]) for lang in ("en", "zh", "ms") if terms.get(lang)]
+    if not active:
+        active = [("en", (item_description or "second hand item").strip())]
 
     out = []
-    for key in keys:
-        p = TRADING_PLATFORMS.get(key)
-        if not p:
-            continue
-        queries = []
-        for lang, term in active_terms:
-            url = p["tmpl"].replace("{q}", urllib.parse.quote(term))
-            queries.append({"lang": lang_labels.get(lang, lang), "term": term, "url": url})
-        out.append({"name": p["name"], "type": p["type"], "queries": queries})
+
+    # 1) General second-hand search (per language).
+    general_q = []
+    for lang, term in active:
+        q = term + " for sale second hand Malaysia"
+        general_q.append({"lang": lang_labels.get(lang, lang), "term": term, "url": _google_url(q)})
+    out.append({"name": "Search second-hand listings", "type": "Google", "queries": general_q})
+
+    # 2) Facebook (marketplace + buy/sell groups + discussion) via Google site search.
+    fb_q = []
+    for lang, term in active:
+        q = term + " second hand site:facebook.com"
+        fb_q.append({"lang": lang_labels.get(lang, lang), "term": term, "url": _google_url(q)})
+    out.append({"name": "Facebook groups & marketplace", "type": "Facebook", "queries": fb_q})
+
+    # 3) Marketplaces (Carousell / Mudah / Shopee) via Google site search.
+    mkt_q = []
+    for lang, term in active:
+        q = term + " (site:carousell.com.my OR site:mudah.my OR site:shopee.com.my)"
+        mkt_q.append({"lang": lang_labels.get(lang, lang), "term": term, "url": _google_url(q)})
+    out.append({"name": "Marketplaces (Carousell, Mudah, Shopee)", "type": "Marketplace", "queries": mkt_q})
+
+    # 4) Donate / recycle discussion.
+    donate_q = []
+    for lang, term in active:
+        q = "donate OR recycle " + term + " Malaysia"
+        donate_q.append({"lang": lang_labels.get(lang, lang), "term": term, "url": _google_url(q)})
+    out.append({"name": "Donate or recycle options", "type": "Donation", "queries": donate_q})
+
     return out
 
 

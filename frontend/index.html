@@ -18,10 +18,10 @@
 </head>
 <body>
     <header>
-        <div class="header-brand">
+        <a class="header-brand" href="#/" id="homeLink">
             <h1><img src="images/logo.png" alt="SmartWaste logo" class="header-logo">SmartWaste</h1>
             <p class="subtitle">AI-Powered Waste Analysis & Disposal Guide</p>
-        </div>
+        </a>
         <nav class="header-actions" aria-label="Account actions">
             <button type="button" class="header-icon-btn" id="profileBtn" aria-label="Profile" title="Profile">
                 <i class="fa-solid fa-user"></i>
@@ -43,7 +43,7 @@
         <span>Waste Collect Portal</span>
     </aside>
 
-    <main>
+    <main id="viewHome" class="app-view">
         <!-- Widget 1: Upload Waste Image -->
         <section class="widget upload-widget">
             <div class="widget-header">
@@ -301,44 +301,94 @@ What would you like to know about waste disposal?</div>
         </div>
     </div>
 
-    <!-- Waste Collect Portal (full-screen overlay with 2 tabs) -->
-    <div class="profile-overlay" id="portalOverlay">
-        <div class="profile-sheet portal-sheet" role="dialog" aria-modal="true" aria-labelledby="portalTitle">
-            <header class="profile-head">
+    <!-- Waste Collect Portal (page) -->
+    <div class="app-page" id="portalOverlay" hidden>
+        <div class="profile-sheet portal-sheet" aria-labelledby="portalTitle">
+            <header class="profile-head page-topbar">
+                <button type="button" class="page-back" data-home aria-label="Back to home">
+                    <i class="fa-solid fa-arrow-left"></i>
+                </button>
                 <h2 id="portalTitle">Waste Collect Portal</h2>
-                <button type="button" class="profile-close" id="portalClose" aria-label="Close">&times;</button>
             </header>
 
             <div class="portal-tabbar" role="tablist">
                 <button type="button" class="portal-tab active" id="portalTabList" role="tab"
                         aria-selected="true" data-portal-tab="list">Waste Collect List</button>
                 <button type="button" class="portal-tab" id="portalTabHistory" role="tab"
-                        aria-selected="false" data-portal-tab="history">History Collected</button>
+                        aria-selected="false" data-portal-tab="history">History</button>
             </div>
 
             <div class="portal-body">
                 <div class="portal-panel" id="portalListPanel">
                     <input type="search" class="portal-search" id="portalSearch"
                            placeholder="Search waste requests...">
+                    <div class="portal-filters">
+                        <label class="portal-filter">
+                            <span>Type</span>
+                            <select id="filterCategory">
+                                <option value="">All types</option>
+                                <option value="Plastic">Plastic</option>
+                                <option value="Paper">Paper</option>
+                                <option value="Metal">Metal</option>
+                                <option value="Glass">Glass</option>
+                                <option value="E-waste">E-waste</option>
+                                <option value="Textile">Textile</option>
+                                <option value="Organic">Organic</option>
+                                <option value="Others">Others</option>
+                            </select>
+                        </label>
+                        <label class="portal-filter">
+                            <span>Date</span>
+                            <select id="filterDate">
+                                <option value="">Any time</option>
+                                <option value="1">Last 24 hours</option>
+                                <option value="7">Last 7 days</option>
+                                <option value="30">Last 30 days</option>
+                            </select>
+                        </label>
+                        <label class="portal-filter">
+                            <span>Distance</span>
+                            <select id="filterDistance">
+                                <option value="">Any distance</option>
+                                <option value="5">Within 5 km</option>
+                                <option value="10">Within 10 km</option>
+                                <option value="25">Within 25 km</option>
+                                <option value="50">Within 50 km</option>
+                            </select>
+                        </label>
+                    </div>
+                    <p class="portal-filter-note" id="distanceNote" hidden>
+                        <i class="fa-solid fa-circle-info"></i>
+                        Enter your location on the home page and re-analyze to enable distance filtering.
+                    </p>
                     <div class="portal-cards" id="portalListCards">
                         <div class="placeholder-text">Loading requests...</div>
                     </div>
                 </div>
                 <div class="portal-panel" id="portalHistoryPanel" hidden>
-                    <div class="portal-cards" id="portalHistoryCards">
-                        <div class="placeholder-text">Loading your reports...</div>
+                    <h3 class="history-subtitle"><i class="fa-solid fa-bullhorn"></i> History Posted</h3>
+                    <p class="history-subnote">Waste you listed for public collection.</p>
+                    <div class="portal-cards" id="historyPostedCards">
+                        <div class="placeholder-text">Loading your posts...</div>
+                    </div>
+                    <h3 class="history-subtitle"><i class="fa-solid fa-box-open"></i> History Collected</h3>
+                    <p class="history-subnote">Items you requested from others and collected.</p>
+                    <div class="portal-cards" id="historyCollectedCards">
+                        <div class="placeholder-text">Loading your collections...</div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Chat Page (full-screen overlay) -->
-    <div class="profile-overlay" id="chatPageOverlay">
-        <div class="profile-sheet chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chatPageTitle">
-            <header class="profile-head">
+    <!-- Chat Page -->
+    <div class="app-page" id="chatPageOverlay" hidden>
+        <div class="profile-sheet chat-sheet" aria-labelledby="chatPageTitle">
+            <header class="profile-head page-topbar">
+                <button type="button" class="page-back" data-home aria-label="Back to home">
+                    <i class="fa-solid fa-arrow-left"></i>
+                </button>
                 <h2 id="chatPageTitle">Messages</h2>
-                <button type="button" class="profile-close" id="chatPageClose" aria-label="Close">&times;</button>
             </header>
             <div class="chat-layout">
                 <aside class="chat-convos" id="chatConvos">
@@ -363,12 +413,14 @@ What would you like to know about waste disposal?</div>
         </div>
     </div>
 
-    <!-- Notifications Page (full-screen overlay) -->
-    <div class="profile-overlay" id="notifOverlay">
-        <div class="profile-sheet notif-sheet" role="dialog" aria-modal="true" aria-labelledby="notifTitle">
-            <header class="profile-head">
+    <!-- Notifications Page -->
+    <div class="app-page" id="notifOverlay" hidden>
+        <div class="profile-sheet notif-sheet" aria-labelledby="notifTitle">
+            <header class="profile-head page-topbar">
+                <button type="button" class="page-back" data-home aria-label="Back to home">
+                    <i class="fa-solid fa-arrow-left"></i>
+                </button>
                 <h2 id="notifTitle">Notifications</h2>
-                <button type="button" class="profile-close" id="notifClose" aria-label="Close">&times;</button>
             </header>
             <div class="notif-layout">
                 <div class="notif-feed-col">
@@ -401,12 +453,14 @@ What would you like to know about waste disposal?</div>
         </div>
     </div>
 
-    <!-- Profile Page (full-screen overlay) -->
-    <div class="profile-overlay" id="profileOverlay">
-        <div class="profile-sheet" role="dialog" aria-modal="true" aria-labelledby="profilePageTitle">
-            <header class="profile-head">
+    <!-- Profile Page -->
+    <div class="app-page" id="profileOverlay" hidden>
+        <div class="profile-sheet" aria-labelledby="profilePageTitle">
+            <header class="profile-head page-topbar">
+                <button type="button" class="page-back" data-home aria-label="Back to home">
+                    <i class="fa-solid fa-arrow-left"></i>
+                </button>
                 <h2 id="profilePageTitle">My Profile</h2>
-                <button type="button" class="profile-close" id="profileClose" aria-label="Close">&times;</button>
             </header>
 
             <div class="profile-body" id="profileBody">

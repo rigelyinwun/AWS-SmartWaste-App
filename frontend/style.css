@@ -1430,9 +1430,10 @@ footer {
     height: 100%;
     background: rgba(0, 0, 0, 0.5);
     z-index: 2000;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
-    padding: 1rem;
+    padding: 1.5rem 1rem;
+    overflow-y: auto;
 }
 
 .auth-overlay.show {
@@ -1446,8 +1447,11 @@ footer {
     padding: 2rem 2rem 1.75rem;
     width: 100%;
     max-width: 420px;
+    max-height: calc(100vh - 3rem);
+    overflow-y: auto;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
     animation: slideUp 0.25s ease;
+    margin: auto;
 }
 
 .auth-modal-close {
@@ -1951,37 +1955,61 @@ footer {
     }
 }
 
-/* === Profile page (full-screen overlay) === */
-.profile-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.5);
-    z-index: 2100;
-    align-items: flex-start;
-    justify-content: center;
-    padding: 2rem 1rem;
-    overflow-y: auto;
+/* === Routed full-page views === */
+/* The home view (#viewHome / <main>) and the 4 app pages are toggled by the
+   hash router via the [hidden] attribute. They flow as normal pages (no scrim). */
+.app-page {
+    animation: fadeIn 0.2s ease-in;
 }
 
-.profile-overlay.show {
-    display: flex;
+.app-page[hidden],
+.app-view[hidden] {
+    display: none !important;
 }
 
-.profile-sheet {
+/* The inner sheet now spans the normal page width (like <main>). */
+.app-page .profile-sheet {
     background: var(--bg);
     width: 100%;
-    max-width: 640px;
-    border-radius: 18px;
-    box-shadow: var(--shadow-lg);
+    max-width: 1200px;
+    margin: 0 auto 2rem;
+    border-radius: 0 0 18px 18px;
     overflow: hidden;
-    animation: slideUp 0.25s ease;
 }
 
+/* Sticky page top bar with back-to-home arrow + title */
+.page-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.page-back {
+    background: rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: #fff;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    font-size: 1rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.2s, transform 0.1s;
+}
+
+.page-back:hover {
+    background: rgba(255, 255, 255, 0.32);
+    transform: translateX(-2px);
+}
+
+/* === Profile / page head bar === */
 .profile-head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 1rem;
     padding: 1rem 1.5rem;
     background: var(--grad-header);
     color: #fff;
@@ -1991,20 +2019,7 @@ footer {
     font-family: var(--font-display);
     font-size: 1.25rem;
     color: #fff;
-}
-
-.profile-close {
-    background: none;
-    border: none;
-    color: #fff;
-    font-size: 1.8rem;
-    line-height: 1;
-    cursor: pointer;
-    padding: 0 0.3rem;
-}
-
-.profile-close:hover {
-    opacity: 0.8;
+    margin: 0;
 }
 
 .profile-body {
@@ -2326,14 +2341,13 @@ footer {
 }
 
 @media (max-width: 768px) {
-    .profile-overlay {
-        padding: 0;
+    .app-page .profile-sheet {
+        max-width: 100%;
+        border-radius: 0;
     }
 
-    .profile-sheet {
-        max-width: 100%;
-        min-height: 100vh;
-        border-radius: 0;
+    .page-topbar {
+        padding: 0.85rem 1rem;
     }
 }
 
@@ -2770,7 +2784,8 @@ footer {
 /* === Chat page === */
 .chat-sheet {
     max-width: 960px;
-    height: 90vh;
+    height: calc(100vh - 90px);
+    min-height: 420px;
     display: flex;
     flex-direction: column;
 }
@@ -3151,4 +3166,102 @@ a.trading-name i {
 .trading-chip i {
     font-size: 0.66rem;
     opacity: 0.75;
+}
+
+/* === Portal: list filters === */
+.portal-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.portal-filter {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.portal-filter select {
+    padding: 0.5rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 0.85rem;
+    font-family: inherit;
+    background: #fafffe;
+    color: var(--text);
+    cursor: pointer;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 500;
+}
+
+.portal-filter select:focus {
+    outline: none;
+    border-color: var(--primary);
+    background: #fff;
+}
+
+.portal-filter select:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.portal-filter-note {
+    font-size: 0.8rem;
+    color: #8a6d1a;
+    background: #fff8e1;
+    border: 1px solid #ffe0a3;
+    border-radius: 8px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.portal-filter-note[hidden] {
+    display: none;
+}
+
+/* === Portal: history sub-sections === */
+.history-subtitle {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--primary-dark);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.5rem 0 0.2rem;
+}
+
+.history-subtitle:first-child {
+    margin-top: 0;
+}
+
+/* Space between the posted list and the next (collected) sub-heading */
+#historyPostedCards {
+    margin-bottom: 1.75rem;
+}
+
+.history-subnote {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-bottom: 0.9rem;
+}
+
+@media (max-width: 768px) {
+    .portal-filters {
+        gap: 0.5rem;
+    }
+
+    .portal-filter {
+        flex: 1 1 calc(50% - 0.5rem);
+    }
 }

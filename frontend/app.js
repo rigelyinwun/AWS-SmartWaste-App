@@ -104,12 +104,25 @@
         profile: function() {
             var user = Auth.currentUser();
             if (!user) return null;
+            // Prefer the live in-memory session (available right after login).
             try {
                 var session = user.signInUserSession;
-                if (!session) return null;
-                var payload = session.getIdToken().decodePayload();
-                return { email: payload.email, name: payload.name, sub: payload.sub };
-            } catch (e) {
+                if (session) {
+                    var payload = session.getIdToken().decodePayload();
+                    return { email: payload.email, name: payload.name, sub: payload.sub };
+                }
+            } catch (e) { /* fall through to cached token */ }
+            // Fallback: decode the ID token the SDK cached in localStorage
+            // (populated on a persisted session before getSession() runs).
+            try {
+                var prefix = 'CognitoIdentityServiceProvider.' + COGNITO_CONFIG.clientId + '.';
+                var lastUser = localStorage.getItem(prefix + 'LastAuthUser');
+                if (!lastUser) return null;
+                var idToken = localStorage.getItem(prefix + lastUser + '.idToken');
+                if (!idToken) return null;
+                var claims = JSON.parse(atob(idToken.split('.')[1]));
+                return { email: claims.email, name: claims.name, sub: claims.sub };
+            } catch (e2) {
                 return null;
             }
         },
@@ -1033,8 +1046,12 @@
                 greeting.className = 'auth-greeting';
                 headerActions.appendChild(greeting);
             }
-            var displayName = (profile && (profile.name || profile.email)) || 'Account';
-            greeting.textContent = 'Hi, ' + displayName.split('@')[0];
+            var displayName = '';
+            if (profile) {
+                displayName = (profile.name && profile.name.trim()) ||
+                    (profile.email ? profile.email.split('@')[0] : '');
+            }
+            greeting.textContent = displayName ? ('Hi, ' + displayName) : 'Hi there';
             greeting.hidden = false;
 
             if (!logoutBtn) {
@@ -1045,6 +1062,8 @@
                 logoutBtn.textContent = 'Logout';
                 logoutBtn.addEventListener('click', function() {
                     Auth.logout();
+                    clearUserState();
+                    navigate('');
                     onAuthChanged();
                 });
                 headerActions.appendChild(logoutBtn);
@@ -1057,15 +1076,126 @@
 
         // Refresh the notification badge whenever auth state changes.
         if (typeof refreshNotifBadge === 'function') refreshNotifBadge();
+        // Re-resolve the current route so gated pages redirect on logout / allow on login.
+        if (typeof router === 'function' && _routerReady) router();
     }
+
+    // Clear all per-user state so a different account doesn't inherit the
+    // previous user's inputs, analysis, or cached data. Called on logout.
+    function clearUserState() {
+        // Analyzer inputs + uploaded file + last analysis
+        if (descriptionInput) descriptionInput.value = '';
+        if (locationInput) locationInput.value = '';
+        fileData = null;
+        fileMime = null;
+        lastWasteDetails = null;
+        if (fileInput) fileInput.value = '';
+        if (uploadPreview) uploadPreview.hidden = true;
+        if (uploadZone) uploadZone.style.display = '';
+        var outputSection = document.getElementById('outputSection');
+        if (outputSection) outputSection.hidden = true;
+        var allowWrap = document.getElementById('allowCollectWrap');
+        if (allowWrap) allowWrap.hidden = true;
+
+        // Chat history (AI assistant)
+        chatHistory = [];
+
+        // Cached collect/portal/chat/notification data
+        if (typeof portalRequests === 'object') { portalRequests.list = []; portalRequests.history = []; }
+        if (typeof lifecycleRequests === 'object') { lifecycleRequests.incoming = []; lifecycleRequests.outgoing = []; }
+        if (typeof notifData !== 'undefined') notifData = [];
+        if (typeof chatConvos !== 'undefined') chatConvos = [];
+        if (typeof currentProfile !== 'undefined') currentProfile = null;
+
+        // Tear down any live chat connection + badge
+        if (typeof window.leaveChatPage === 'function') window.leaveChatPage();
+        if (notifBadge) notifBadge.hidden = true;
+    }
+    window.clearUserState = clearUserState;
+
+    var _routerReady = false;
 
     // Initialize header to reflect any persisted session (SDK uses localStorage).
     onAuthChanged();
 
+    // ===================== Hash router =====================
+    // Full-page views are routed by URL hash: #/, #/profile, #/chat,
+    // #/notifications, #/portal. Each page is a .app-page section; home is #viewHome.
+    var ROUTES = {
+        '': { view: 'viewHome', gated: false },
+        'profile': { view: 'profileOverlay', gated: true, enter: function() { onEnterProfile(); } },
+        'chat': { view: 'chatPageOverlay', gated: true, enter: function(arg) { onEnterChat(arg); } },
+        'notifications': { view: 'notifOverlay', gated: true, enter: function() { onEnterNotifications(); } },
+        'portal': { view: 'portalOverlay', gated: true, enter: function(arg) { onEnterPortal(arg); } },
+    };
+
+    function parseHash() {
+        // Formats: '', '#/', '#/profile', '#/portal/history', '#/chat/<id>'
+        var raw = (location.hash || '').replace(/^#\/?/, '');
+        var parts = raw.split('/');
+        return { name: parts[0] || '', arg: parts[1] || '' };
+    }
+
+    var _currentView = null;
+    function showView(viewId) {
+        // Leaving the chat page: tear down its live socket/polling.
+        if (_currentView === 'chatPageOverlay' && viewId !== 'chatPageOverlay' &&
+            typeof window.leaveChatPage === 'function') {
+            window.leaveChatPage();
+        }
+        var pages = document.querySelectorAll('.app-view, .app-page');
+        for (var i = 0; i < pages.length; i++) {
+            pages[i].hidden = (pages[i].id !== viewId);
+        }
+        _currentView = viewId;
+        window.scrollTo(0, 0);
+    }
+
+    function navigate(route) {
+        // route like 'profile' or 'portal/history'; '' = home.
+        var target = route ? ('#/' + route) : '#/';
+        if (location.hash === target) {
+            router();  // same hash: re-run (e.g. refresh data)
+        } else {
+            location.hash = target;  // triggers hashchange -> router
+        }
+    }
+
+    function router() {
+        var h = parseHash();
+        var def = ROUTES[h.name] || ROUTES[''];
+
+        // Login-gate: bounce protected routes to home + open login modal.
+        if (def.gated && !Auth.isLoggedIn()) {
+            showView('viewHome');
+            if (location.hash && location.hash !== '#/') {
+                history.replaceState(null, '', '#/');
+            }
+            openAuth('login');
+            return;
+        }
+
+        showView(def.view);
+        if (typeof def.enter === 'function') def.enter(h.arg);
+    }
+
+    window.addEventListener('hashchange', router);
+    _routerReady = true;
+
+    // Home link + all back-to-home arrows.
+    var homeLink = document.getElementById('homeLink');
+    if (homeLink) homeLink.addEventListener('click', function(e) {
+        e.preventDefault();
+        navigate('');
+    });
+    var backBtns = document.querySelectorAll('[data-home]');
+    for (var bi = 0; bi < backBtns.length; bi++) {
+        backBtns[bi].addEventListener('click', function() { navigate(''); });
+    }
+
     // ===================== Profile page =====================
     var profileBtn = document.getElementById('profileBtn');
     var profileOverlay = document.getElementById('profileOverlay');
-    var profileClose = document.getElementById('profileClose');
     var profileView = document.getElementById('profileView');
     var profileEdit = document.getElementById('profileEdit');
     var editProfileBtn = document.getElementById('editProfileBtn');
@@ -1103,19 +1233,10 @@
         });
     }
 
-    function openProfile() {
-        // Login-gated: if not signed in, open the login modal instead.
-        if (!Auth.isLoggedIn()) {
-            openAuth('login');
-            return;
-        }
-        profileOverlay.classList.add('show');
+    // Router entry: profile view just became visible — load its data.
+    function onEnterProfile() {
         showProfileView();
         loadProfile();
-    }
-
-    function closeProfile() {
-        profileOverlay.classList.remove('show');
     }
 
     function showProfileView() {
@@ -1175,11 +1296,7 @@
         if (el) el.hidden = true;
     }
 
-    if (profileBtn) profileBtn.addEventListener('click', openProfile);
-    if (profileClose) profileClose.addEventListener('click', closeProfile);
-    profileOverlay.addEventListener('click', function(e) {
-        if (e.target === profileOverlay) closeProfile();
-    });
+    if (profileBtn) profileBtn.addEventListener('click', function() { navigate('profile'); });
 
     if (editProfileBtn) editProfileBtn.addEventListener('click', showProfileEdit);
     if (cancelEditBtn) cancelEditBtn.addEventListener('click', showProfileView);
@@ -1260,7 +1377,8 @@
 
     if (profileLogoutBtn) profileLogoutBtn.addEventListener('click', function() {
         Auth.logout();
-        closeProfile();
+        clearUserState();
+        navigate('');
         onAuthChanged();
     });
 
@@ -1281,7 +1399,8 @@
             deleteConfirmBtn.disabled = false;
             deleteConfirmOverlay.classList.remove('show');
             Auth.logout();
-            closeProfile();
+            clearUserState();
+            navigate('');
             onAuthChanged();
             alert('Your account has been deleted.');
         }).catch(function(err) {
@@ -1298,7 +1417,6 @@
     var reportSubmit = document.getElementById('reportSubmit');
     var reportSummary = document.getElementById('reportSummary');
     var portalOverlay = document.getElementById('portalOverlay');
-    var portalClose = document.getElementById('portalClose');
     var sideLegend = document.querySelector('.side-legend');
 
     function collectConfigured() {
@@ -1419,7 +1537,7 @@
     var reportDoneOk = document.getElementById('reportDoneOk');
     if (reportDoneOk) reportDoneOk.addEventListener('click', function() {
         reportDoneOverlay.classList.remove('show');
-        openPortal('list');
+        navigate('portal');
     });
     if (reportDoneOverlay) reportDoneOverlay.addEventListener('click', function(e) {
         if (e.target === reportDoneOverlay) reportDoneOverlay.classList.remove('show');
@@ -1428,14 +1546,9 @@
     // --- Portal page ---
     var portalRequests = { list: [], history: [] };
 
-    function openPortal(which) {
-        if (!Auth.isLoggedIn()) { openAuth('login'); return; }
-        portalOverlay.classList.add('show');
+    // Router entry: portal view visible — arg is optional tab ('list'|'history').
+    function onEnterPortal(which) {
         switchPortalTab(which || 'list');
-    }
-
-    function closePortal() {
-        portalOverlay.classList.remove('show');
     }
 
     function switchPortalTab(which) {
@@ -1454,23 +1567,137 @@
     function loadPortalList() {
         var cards = document.getElementById('portalListCards');
         cards.innerHTML = '<div class="placeholder-text">Loading requests...</div>';
+        updateDistanceAvailability();
         collectFetch('GET', null, 'list').then(function(data) {
             portalRequests.list = (data && data.requests) || [];
-            renderPortalCards(cards, portalRequests.list, 'list');
+            applyListFilters();
         }).catch(function(err) {
             cards.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
         });
     }
 
+    // History tab: posted (my own reports) + collected (my outgoing requests
+    // that reached 'collected').
     function loadPortalHistory() {
-        var cards = document.getElementById('portalHistoryCards');
-        cards.innerHTML = '<div class="placeholder-text">Loading your reports...</div>';
+        var postedEl = document.getElementById('historyPostedCards');
+        var collectedEl = document.getElementById('historyCollectedCards');
+        postedEl.innerHTML = '<div class="placeholder-text">Loading your posts...</div>';
+        collectedEl.innerHTML = '<div class="placeholder-text">Loading your collections...</div>';
+
         collectFetch('GET', null, 'mine').then(function(data) {
-            portalRequests.history = (data && data.requests) || [];
-            renderPortalCards(cards, portalRequests.history, 'history');
+            var mine = (data && data.requests) || [];
+            portalRequests.history = mine;
+            renderPortalCards(postedEl, mine, 'posted');
         }).catch(function(err) {
-            cards.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
+            postedEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
         });
+
+        collectFetch('GET', null, 'requests').then(function(data) {
+            var outgoing = (data && data.outgoing) || [];
+            var collected = outgoing.filter(function(r) {
+                return (r.status === 'collected' || r.status === 'done');
+            });
+            renderCollectedCards(collectedEl, collected);
+        }).catch(function(err) {
+            collectedEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
+        });
+    }
+
+    // Collected items come from collect-requests, which have a slightly
+    // different shape than waste reports — render a compact variant.
+    function renderCollectedCards(container, items) {
+        if (!items.length) {
+            container.innerHTML = '<div class="placeholder-text">You haven\'t collected anything yet.</div>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < items.length; i++) {
+            var r = items[i];
+            html += '<div class="request-card">';
+            html += '<div class="request-card-head">';
+            html += '<div class="request-title">' + escapeHtml(r.wasteType || 'Waste item') + '</div>';
+            html += statusBadge(r.status);
+            html += '</div>';
+            html += '<div class="request-submitted">Collected from ' +
+                escapeHtml(r.ownerName || 'owner') + '</div>';
+            html += '<div class="request-meta">';
+            if (r.area) html += '<div><i class="fa-solid fa-location-dot"></i> ' + escapeHtml(r.area) + '</div>';
+            html += '<div><i class="fa-solid fa-box"></i> ' +
+                escapeHtml((r.category || 'Waste') + (r.weight ? ' • ' + r.weight : '')) + '</div>';
+            html += '</div></div>';
+        }
+        container.innerHTML = html;
+    }
+
+    // --- Waste Collect List filters (client-side) ---
+    function viewerCenter() {
+        // Prefer the live facilities map center (from the user's analyzed
+        // location); it exists only after an analysis with a location.
+        if (facilitiesMap && typeof facilitiesMap.getCenter === 'function') {
+            try {
+                var c = facilitiesMap.getCenter();
+                if (c && typeof c.lat === 'number') return { lat: c.lat, lng: c.lng };
+            } catch (e) { /* ignore */ }
+        }
+        return null;
+    }
+
+    function updateDistanceAvailability() {
+        var note = document.getElementById('distanceNote');
+        var sel = document.getElementById('filterDistance');
+        var hasCenter = !!viewerCenter();
+        if (note) note.hidden = hasCenter;
+        if (sel) sel.disabled = !hasCenter;
+    }
+
+    function applyListFilters() {
+        var cards = document.getElementById('portalListCards');
+        var q = (document.getElementById('portalSearch').value || '').trim().toLowerCase();
+        var cat = document.getElementById('filterCategory').value;
+        var days = parseInt(document.getElementById('filterDate').value, 10);
+        var maxKm = parseInt(document.getElementById('filterDistance').value, 10);
+        var center = viewerCenter();
+        var nowSec = Date.now() / 1000;
+
+        var filtered = portalRequests.list.filter(function(r) {
+            // Search across type / category / area
+            if (q) {
+                var hay = ((r.wasteType || '') + ' ' + (r.category || '') + ' ' + (r.area || '')).toLowerCase();
+                if (hay.indexOf(q) === -1) return false;
+            }
+            // Category (match "Others" to anything not in the known list)
+            if (cat) {
+                var rc = (r.category || '').toLowerCase();
+                if (cat === 'Others') {
+                    var known = ['plastic', 'paper', 'metal', 'glass', 'e-waste', 'textile', 'organic'];
+                    if (known.indexOf(rc) !== -1) return false;
+                } else if (rc !== cat.toLowerCase()) {
+                    return false;
+                }
+            }
+            // Date window
+            if (days && r.createdAt) {
+                if (r.createdAt < nowSec - days * 86400) return false;
+            }
+            // Distance (only when we know the viewer's center and item coords)
+            if (maxKm && center && typeof r.lat === 'number' && typeof r.lng === 'number') {
+                var d = haversineKm(center.lat, center.lng, r.lat, r.lng);
+                if (d > maxKm) return false;
+            }
+            return true;
+        });
+
+        renderPortalCards(cards, filtered, 'list');
+    }
+
+    // Local haversine (km) for client-side distance filtering.
+    function haversineKm(lat1, lng1, lat2, lng2) {
+        var R = 6371, toRad = Math.PI / 180;
+        var dLat = (lat2 - lat1) * toRad, dLng = (lng2 - lng1) * toRad;
+        var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
+            Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        return 2 * R * Math.asin(Math.sqrt(a));
     }
 
     function statusBadge(status) {
@@ -1487,9 +1714,10 @@
 
     function renderPortalCards(container, requests, mode) {
         if (!requests.length) {
-            container.innerHTML = '<div class="placeholder-text">' +
-                (mode === 'history' ? 'You haven\'t listed any waste yet.' : 'No open requests right now.') +
-                '</div>';
+            var emptyMsg = 'No open requests right now.';
+            if (mode === 'posted') emptyMsg = 'You haven\'t listed any waste yet.';
+            else if (mode === 'list') emptyMsg = 'No requests match your filters.';
+            container.innerHTML = '<div class="placeholder-text">' + emptyMsg + '</div>';
             return;
         }
         var html = '';
@@ -1527,27 +1755,19 @@
 
     // Search filter on the public list
     var portalSearch = document.getElementById('portalSearch');
-    if (portalSearch) portalSearch.addEventListener('input', function() {
-        var q = this.value.trim().toLowerCase();
-        var filtered = portalRequests.list.filter(function(r) {
-            return (r.wasteType || '').toLowerCase().indexOf(q) !== -1 ||
-                   (r.category || '').toLowerCase().indexOf(q) !== -1 ||
-                   (r.area || '').toLowerCase().indexOf(q) !== -1;
-        });
-        renderPortalCards(document.getElementById('portalListCards'), filtered, 'list');
+    if (portalSearch) portalSearch.addEventListener('input', applyListFilters);
+    ['filterCategory', 'filterDate', 'filterDistance'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('change', applyListFilters);
     });
 
-    if (portalClose) portalClose.addEventListener('click', closePortal);
-    portalOverlay.addEventListener('click', function(e) {
-        if (e.target === portalOverlay) closePortal();
-    });
     if (sideLegend) {
         sideLegend.style.cursor = 'pointer';
         sideLegend.setAttribute('role', 'button');
         sideLegend.setAttribute('tabindex', '0');
-        sideLegend.addEventListener('click', function() { openPortal('list'); });
+        sideLegend.addEventListener('click', function() { navigate('portal'); });
         sideLegend.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPortal('list'); }
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('portal'); }
         });
     }
 
@@ -1635,26 +1855,19 @@
     // ===================== Notifications =====================
     var notifBtn = document.getElementById('notificationsBtn');
     var notifOverlay = document.getElementById('notifOverlay');
-    var notifClose = document.getElementById('notifClose');
     var notifFeedEl = document.getElementById('notifFeed');
     var notifDetailEl = document.getElementById('notifDetail');
     var notifBadge = document.getElementById('notifBadge');
     var notifData = [];
     var lifecycleRequests = { incoming: [], outgoing: [] };
 
-    function openNotifications() {
-        if (!Auth.isLoggedIn()) { openAuth('login'); return; }
-        notifOverlay.classList.add('show');
+    // Router entry: notifications view visible — load feed + lifecycle data.
+    function onEnterNotifications() {
         loadNotifications();
         loadLifecycleRequests();
     }
-    function closeNotifications() { notifOverlay.classList.remove('show'); }
 
-    if (notifBtn) notifBtn.addEventListener('click', openNotifications);
-    if (notifClose) notifClose.addEventListener('click', closeNotifications);
-    notifOverlay.addEventListener('click', function(e) {
-        if (e.target === notifOverlay) closeNotifications();
-    });
+    if (notifBtn) notifBtn.addEventListener('click', function() { navigate('notifications'); });
 
     function refreshNotifBadge() {
         if (!collectConfigured() || !Auth.isLoggedIn()) {
@@ -1672,13 +1885,13 @@
 
     function loadNotifications() {
         notifFeedEl.innerHTML = '<div class="placeholder-text">Loading...</div>';
+        // Clear the badge immediately on viewing (don't wait for the network).
+        if (notifBadge) notifBadge.hidden = true;
         collectFetch('GET', null, 'notifications').then(function(data) {
             notifData = (data && data.notifications) || [];
             renderNotifFeed();
-            // Mark read once viewed, then clear the badge.
-            collectFetch('POST', null, 'notifications/read').then(function() {
-                if (notifBadge) notifBadge.hidden = true;
-            }).catch(function() {});
+            // Persist read state server-side (best effort).
+            collectFetch('POST', null, 'notifications/read').catch(function() {});
         }).catch(function(err) {
             notifFeedEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
         });
@@ -1795,15 +2008,12 @@
         if (rejectBtn) rejectBtn.addEventListener('click', function() { act('reject', rejectBtn.getAttribute('data-reject'), rejectBtn); });
         if (doneBtn) doneBtn.addEventListener('click', function() { act('done', doneBtn.getAttribute('data-done'), doneBtn); });
         if (chatBtn) chatBtn.addEventListener('click', function() {
-            var cid = chatBtn.getAttribute('data-chat');
-            closeNotifications();
-            openChatPage(cid);
+            openChatPage(chatBtn.getAttribute('data-chat'));
         });
     }
 
     // ===================== P2P Chat (AppSync Events + polling fallback) =====================
     var chatPageOverlay = document.getElementById('chatPageOverlay');
-    var chatPageClose = document.getElementById('chatPageClose');
     var chatConvosEl = document.getElementById('chatConvos');
     var chatThreadEl = document.getElementById('chatThread');
     var chatThreadHead = document.getElementById('chatThreadHead');
@@ -1823,23 +2033,23 @@
                APPSYNC_CONFIG.apiKey && APPSYNC_CONFIG.apiKey.indexOf('__APPSYNC_') !== 0;
     }
 
+    // Navigate to the chat page, optionally opening a specific conversation.
     function openChatPage(conversationId) {
-        if (!Auth.isLoggedIn()) { openAuth('login'); return; }
-        chatPageOverlay.classList.add('show');
+        navigate(conversationId ? ('chat/' + conversationId) : 'chat');
+    }
+
+    // Router entry: chat view visible — arg is optional conversationId.
+    function onEnterChat(conversationId) {
         loadConversations(conversationId);
     }
 
-    function closeChatPage() {
-        chatPageOverlay.classList.remove('show');
+    // Called by the router when leaving the chat page — tear down live connections.
+    function leaveChatPage() {
         teardownRealtime();
         stopPolling();
         activeConvo = null;
     }
-
-    if (chatPageClose) chatPageClose.addEventListener('click', closeChatPage);
-    chatPageOverlay.addEventListener('click', function(e) {
-        if (e.target === chatPageOverlay) closeChatPage();
-    });
+    window.leaveChatPage = leaveChatPage;
 
     function loadConversations(openId) {
         chatConvosEl.innerHTML = '<div class="placeholder-text">Loading chats...</div>';
@@ -2582,5 +2792,8 @@
             this.classList.remove('show');
         }
     });
+
+    // Resolve the initial route on load (handles deep links / refresh on a page).
+    router();
 
 })();
