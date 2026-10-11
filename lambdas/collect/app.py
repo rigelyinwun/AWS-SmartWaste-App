@@ -1269,6 +1269,347 @@ def raise_dispute(claims, body):
     return _creq_view(cr, _get_waste(cr["wasteId"]))
 
 
+# ------------------- Collector business accounts (Part C) -------------------
+# A collector record lives in collectors_table keyed by userId. Lifecycle:
+#   none -> draft (apply) -> pending (submit) -> approved | rejected (admin)
+#   approved -> suspended (admin). Verification documents are uploaded straight
+# to S3 via presigned PUT; only the object key is stored on the record.
+
+_COLLECTOR_REQUIRED_FIELDS = (
+    "businessName", "registrationNumber", "wasteCarrierLicense",
+    "contactPhone", "contactEmail",
+)
+
+
+def _collector_view(c):
+    """Shape a collector record for its owner. Returns {'status':'none'} shape
+    when there is no record."""
+    if not c:
+        return {"status": "none"}
+    return {
+        "status": c.get("status", "none"),
+        "businessName": c.get("businessName", ""),
+        "registrationNumber": c.get("registrationNumber", ""),
+        "wasteCarrierLicense": c.get("wasteCarrierLicense", ""),
+        "serviceAreas": c.get("serviceAreas", []) or [],
+        "wasteCategories": c.get("wasteCategories", []) or [],
+        "contactPhone": c.get("contactPhone", ""),
+        "contactEmail": c.get("contactEmail", ""),
+        "docKeys": c.get("docKeys", {}) or {},
+        "rejectionReason": c.get("rejectionReason", ""),
+        "createdAt": c.get("createdAt"),
+        "updatedAt": c.get("updatedAt"),
+        "verifiedAt": c.get("verifiedAt"),
+    }
+
+
+def collector_apply(claims, body):
+    """Upsert a 'draft' record (idempotent). Re-applying keeps prior data and
+    only updates the supplied fields — it never regresses an approved/pending
+    account back to draft."""
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    user_id = claims["sub"]
+    now = int(time.time())
+    existing = _get_collector(user_id) or {}
+    rec = dict(existing)
+    rec["userId"] = user_id
+    # Keep an existing lifecycle status; only a brand-new record starts 'draft'.
+    rec["status"] = existing.get("status") or "draft"
+    rec.setdefault("createdAt", now)
+    rec.setdefault("docKeys", existing.get("docKeys", {}) or {})
+    # Apply the editable profile fields when present (idempotent upsert).
+    rec["businessName"] = _s(body.get("businessName")) or existing.get("businessName", "")
+    rec["registrationNumber"] = _s(body.get("registrationNumber")) or existing.get("registrationNumber", "")
+    rec["wasteCarrierLicense"] = _s(body.get("wasteCarrierLicense")) or existing.get("wasteCarrierLicense", "")
+    rec["contactPhone"] = _s(body.get("contactPhone")) or existing.get("contactPhone", "")
+    rec["contactEmail"] = _s(body.get("contactEmail")) or existing.get("contactEmail", "")
+    if isinstance(body.get("serviceAreas"), list):
+        rec["serviceAreas"] = [_s(x) for x in body.get("serviceAreas") if _s(x)]
+    else:
+        rec["serviceAreas"] = existing.get("serviceAreas", []) or []
+    if isinstance(body.get("wasteCategories"), list):
+        rec["wasteCategories"] = [_s(x) for x in body.get("wasteCategories") if _s(x)]
+    else:
+        rec["wasteCategories"] = existing.get("wasteCategories", []) or []
+    rec["updatedAt"] = now
+    collectors_table.put_item(Item=rec)
+    return _collector_view(rec)
+
+
+def collector_submit(claims, body):
+    """Move a 'draft' record to 'pending' after validating required fields."""
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    user_id = claims["sub"]
+    c = _get_collector(user_id)
+    if not c:
+        return json_response({"error": "Apply before submitting for verification"}, status=404)
+    if c.get("status") in ("approved", "pending"):
+        return json_response({"error": "Your application is already submitted"}, status=409)
+    # Validate scalar required fields in order, naming the first missing one.
+    for field in _COLLECTOR_REQUIRED_FIELDS:
+        if not _s(c.get(field)):
+            return json_response({"error": field + " is required"}, status=400)
+    # serviceAreas / wasteCategories must each be a non-empty list.
+    if not (isinstance(c.get("serviceAreas"), list) and c.get("serviceAreas")):
+        return json_response({"error": "serviceAreas is required"}, status=400)
+    if not (isinstance(c.get("wasteCategories"), list) and c.get("wasteCategories")):
+        return json_response({"error": "wasteCategories is required"}, status=400)
+
+    now = int(time.time())
+    collectors_table.update_item(
+        Key={"userId": user_id},
+        UpdateExpression="SET #s = :s, updatedAt = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":s": "pending", ":t": now},
+    )
+    c["status"] = "pending"
+    c["updatedAt"] = now
+    notify(user_id, "request", "Verification submitted",
+           "Your collector application is now pending review.",
+           {"collector": True})
+    return _collector_view(c)
+
+
+def collector_me(claims):
+    """Return the caller's collector record (or {'status':'none'})."""
+    return _collector_view(_get_collector(claims["sub"]))
+
+
+# NIT#5: only these content types may be presigned for a verification upload.
+UPLOAD_CONTENT_TYPES = {"image/png", "image/jpeg", "application/pdf"}
+
+
+def collector_upload_url(claims, body):
+    """Presign a PUT so the browser can upload a verification document straight
+    to S3. The signed ContentType MUST equal the Content-Type the browser sends
+    on the PUT, so we echo the validated contentType back to the caller."""
+    if not collectors_table or not COLLECTOR_DOCS_BUCKET:
+        return json_response({"error": "Service unavailable"}, status=503)
+    user_id = claims["sub"]
+    doc_type = _s(body.get("docType"))
+    content_type = _s(body.get("contentType"))
+    if doc_type not in DOC_TYPES:
+        return json_response({"error": "Unsupported document type"}, status=400)
+    # NIT#5: reject anything outside the allow-list.
+    if content_type not in UPLOAD_CONTENT_TYPES:
+        return json_response({"error": "Unsupported content type"}, status=400)
+    key = "collectors/{}/{}".format(user_id, doc_type)
+    try:
+        url = s3.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": COLLECTOR_DOCS_BUCKET, "Key": key, "ContentType": content_type},
+            ExpiresIn=300,
+        )
+    except Exception as e:
+        logger.error("presign upload error: %s", str(e))
+        return json_response({"error": "Could not create upload URL"}, status=500)
+    # Record the key on the collector record so the admin queue can find it.
+    try:
+        collectors_table.update_item(
+            Key={"userId": user_id},
+            UpdateExpression="SET docKeys.#d = :k, updatedAt = :t",
+            ExpressionAttributeNames={"#d": doc_type},
+            ExpressionAttributeValues={":k": key, ":t": int(time.time())},
+        )
+    except Exception as e:
+        # The record may not have a docKeys map yet — set the whole map then.
+        logger.warning("docKeys update fallback: %s", str(e))
+        try:
+            collectors_table.update_item(
+                Key={"userId": user_id},
+                UpdateExpression="SET docKeys = :m, updatedAt = :t",
+                ExpressionAttributeValues={":m": {doc_type: key}, ":t": int(time.time())},
+            )
+        except Exception as e2:
+            logger.error("docKeys set error: %s", str(e2))
+    return {"url": url, "key": key}
+
+
+# ------------------- Admin verification queue (Part D) ----------------------
+
+_COLLECTOR_STATUSES = {"pending", "approved", "rejected", "suspended"}
+
+
+def _is_admin(claims):
+    # cognito:groups is TOKEN-SCOPED: a newly-added admin must re-login (or wait
+    # for their ID token to refresh) before this returns True.
+    return "admins" in (claims.get("cognito:groups") or [])
+
+
+def admin_list_collectors(claims, status):
+    """List collector records in a given lifecycle status, newest-first, with a
+    short-lived presigned GET URL per uploaded document."""
+    if not _is_admin(claims):
+        return json_response({"error": "Not authorized"}, status=403)
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    status = _s(status) or "pending"
+    if status not in _COLLECTOR_STATUSES:
+        return json_response({"error": "Invalid status filter"}, status=400)
+    items = []
+    try:
+        resp = collectors_table.query(
+            IndexName="statusIndex",
+            KeyConditionExpression=Key("status").eq(status),
+            ScanIndexForward=False,  # newest first
+            Limit=100,
+        )
+        items = resp.get("Items", [])
+    except Exception as e:
+        logger.error("admin_list_collectors query error: %s", str(e))
+    out = []
+    for c in items:
+        v = _collector_view(c)
+        v["userId"] = c.get("userId")
+        # Attach a short-lived presigned GET per document, tolerating a missing
+        # object (presign never checks existence, so this only fails on a client
+        # error — logged, not fatal).
+        doc_urls = {}
+        for dt, key in (c.get("docKeys") or {}).items():
+            if not key:
+                continue
+            try:
+                doc_urls[dt] = s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": COLLECTOR_DOCS_BUCKET, "Key": key},
+                    ExpiresIn=300,
+                )
+            except Exception as e:
+                logger.warning("presign get error for %s: %s", key, str(e))
+        v["docUrls"] = doc_urls
+        out.append(v)
+    return {"collectors": out}
+
+
+def admin_approve_collector(claims, collector_id):
+    if not _is_admin(claims):
+        return json_response({"error": "Not authorized"}, status=403)
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    c = _get_collector(collector_id)
+    if not c:
+        return json_response({"error": "Collector not found"}, status=404)
+    if c.get("status") != "pending":
+        return json_response({"error": "Only a pending application can be approved"}, status=409)
+    now = int(time.time())
+    collectors_table.update_item(
+        Key={"userId": collector_id},
+        UpdateExpression="SET #s = :s, verifiedAt = :v, verifiedBy = :b, updatedAt = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":s": "approved", ":v": now, ":b": claims["sub"], ":t": now},
+    )
+    notify(collector_id, "approved", "Collector verified",
+           "Your collector business account has been approved. You can now quote on paid pickups.",
+           {"collector": True})
+    c["status"] = "approved"
+    c["verifiedAt"] = now
+    c["updatedAt"] = now
+    return _collector_view(c)
+
+
+def admin_reject_collector(claims, collector_id, body):
+    if not _is_admin(claims):
+        return json_response({"error": "Not authorized"}, status=403)
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    c = _get_collector(collector_id)
+    if not c:
+        return json_response({"error": "Collector not found"}, status=404)
+    if c.get("status") != "pending":
+        return json_response({"error": "Only a pending application can be rejected"}, status=409)
+    reason = _s((body or {}).get("reason"))[:1000]
+    now = int(time.time())
+    collectors_table.update_item(
+        Key={"userId": collector_id},
+        UpdateExpression="SET #s = :s, rejectionReason = :r, updatedAt = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":s": "rejected", ":r": reason, ":t": now},
+    )
+    notify(collector_id, "rejected", "Verification declined",
+           ("Your collector application was declined. " + reason).strip(),
+           {"collector": True})
+    c["status"] = "rejected"
+    c["rejectionReason"] = reason
+    c["updatedAt"] = now
+    return _collector_view(c)
+
+
+def admin_suspend_collector(claims, collector_id):
+    if not _is_admin(claims):
+        return json_response({"error": "Not authorized"}, status=403)
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    c = _get_collector(collector_id)
+    if not c:
+        return json_response({"error": "Collector not found"}, status=404)
+    if c.get("status") != "approved":
+        return json_response({"error": "Only an approved collector can be suspended"}, status=409)
+    now = int(time.time())
+    collectors_table.update_item(
+        Key={"userId": collector_id},
+        UpdateExpression="SET #s = :s, updatedAt = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":s": "suspended", ":t": now},
+    )
+    notify(collector_id, "rejected", "Collector suspended",
+           "Your collector business account has been suspended.",
+           {"collector": True})
+    c["status"] = "suspended"
+    c["updatedAt"] = now
+    return _collector_view(c)
+
+
+# ------------------- Prefix dispatchers (/collector/ and /admin/) -----------
+# These MUST run IN FRONT of the handler()'s endswith chain: a route such as
+# /admin/collectors/{id}/approve would otherwise be captured by
+# route.endswith('approve') and mis-routed to approve_request.
+
+def dispatch_collector(claims, route, body):
+    if route.endswith("/collector/apply"):
+        return collector_apply(claims, body)
+    if route.endswith("/collector/submit"):
+        return collector_submit(claims, body)
+    if route.endswith("/collector/upload-url"):
+        return collector_upload_url(claims, body)
+    return json_response({"error": "Unsupported route"}, status=400)
+
+
+def dispatch_collector_get(claims, route):
+    if route.endswith("/collector/me"):
+        return collector_me(claims)
+    return json_response({"error": "Unsupported route"}, status=400)
+
+
+def dispatch_admin(claims, route, body):
+    """POST /admin/collectors/{id}/{action}. Parse the id + action out of the
+    path, validate the action, check _is_admin FIRST, then dispatch."""
+    parts = route.split("/")  # ['', 'admin', 'collectors', '<id>', '<action>']
+    if len(parts) >= 5 and parts[-4] == "admin" and parts[-3] == "collectors":
+        collector_id = parts[-2]
+        action = parts[-1]
+        if action not in ("approve", "reject", "suspend"):
+            return json_response({"error": "Unsupported admin action"}, status=400)
+        if not _is_admin(claims):
+            return json_response({"error": "Not authorized"}, status=403)
+        if action == "approve":
+            return admin_approve_collector(claims, collector_id)
+        if action == "reject":
+            return admin_reject_collector(claims, collector_id, body)
+        if action == "suspend":
+            return admin_suspend_collector(claims, collector_id)
+    return json_response({"error": "Unsupported route"}, status=400)
+
+
+def dispatch_admin_get(claims, route):
+    if route.endswith("/admin/collectors"):
+        status = request.args.get("status", "pending")
+        return admin_list_collectors(claims, status)
+    return json_response({"error": "Unsupported route"}, status=400)
+
+
 def list_requests(claims):
     """Incoming (requests on my items) + outgoing (my own requests)."""
     me = claims["sub"]
@@ -1448,6 +1789,12 @@ def handler(path):
 
         if request.method == "POST":
             body = request.get_json(force=True, silent=True) or {}
+            # Prefix dispatch MUST precede the endswith chain so that
+            # /admin/collectors/{id}/approve is not captured by endswith('approve').
+            if route.startswith("/admin/"):
+                return _unwrap(dispatch_admin(claims, route, body))
+            if route.startswith("/collector/"):
+                return _unwrap(dispatch_collector(claims, route, body))
             if route.endswith("report"):
                 return _unwrap(create_report(claims, body))
             if route.endswith("request"):
@@ -1456,6 +1803,12 @@ def handler(path):
                 return _unwrap(approve_request(claims, body))
             if route.endswith("reject"):
                 return _unwrap(reject_request(claims, body))
+            if route.endswith("confirm"):
+                return _unwrap(confirm_deal(claims, body))
+            if route.endswith("cancel"):
+                return _unwrap(cancel_request(claims, body))
+            if route.endswith("dispute"):
+                return _unwrap(raise_dispute(claims, body))
             if route.endswith("done"):
                 return _unwrap(mark_done(claims, body))
             if route.endswith("message"):
@@ -1469,6 +1822,11 @@ def handler(path):
             return json_response({"error": "Unsupported route"}, status=400)
 
         # GET
+        # Prefix dispatch MUST precede the endswith chain (same collision reason).
+        if route.startswith("/collector/"):
+            return _unwrap(dispatch_collector_get(claims, route))
+        if route.startswith("/admin/"):
+            return _unwrap(dispatch_admin_get(claims, route))
         if route.endswith("mine"):
             return _unwrap(list_mine(claims))
         if route.endswith("requests"):
