@@ -209,8 +209,16 @@
         lastWasteDetails = null;
         var allowWrap = document.getElementById('allowCollectWrap');
         if (allowWrap) allowWrap.hidden = true;
+        setAllowCollectInline(false);
         var outputSection = document.getElementById('outputSection');
         if (outputSection) outputSection.hidden = true;
+    }
+
+    // Keep the Future Actions inline "Allow Public Collect" prompt in sync with
+    // the Waste Details button: visible only for a valid, collectable item.
+    function setAllowCollectInline(show) {
+        var el = document.getElementById('allowCollectInline');
+        if (el) el.hidden = !show;
     }
 
     function handleFile(file) {
@@ -693,6 +701,7 @@
                 lastWasteDetails = null;
                 var allowWrapRej = document.getElementById('allowCollectWrap');
                 if (allowWrapRej) allowWrapRej.hidden = true;
+                setAllowCollectInline(false);
                 runAllBtn.disabled = false;
                 runAllBtn.textContent = '\ud83d\udd0d Analyze Waste';
                 return;
@@ -721,6 +730,7 @@
             lastWasteDetails = wasteDetailsData || {};
             var allowWrap = document.getElementById('allowCollectWrap');
             if (allowWrap) allowWrap.hidden = false;
+            setAllowCollectInline(true);
 
             // Kick off the nearby-facilities lookup (renders its own map + list).
             loadNearbyFacilities({
@@ -1127,6 +1137,7 @@
         if (outputSection) outputSection.hidden = true;
         var allowWrap = document.getElementById('allowCollectWrap');
         if (allowWrap) allowWrap.hidden = true;
+        setAllowCollectInline(false);
 
         // Chat history (AI assistant)
         chatHistory = [];
@@ -1639,6 +1650,8 @@
     }
 
     if (allowCollectBtn) allowCollectBtn.addEventListener('click', openReportForm);
+    var allowCollectBtnActions = document.getElementById('allowCollectBtnActions');
+    if (allowCollectBtnActions) allowCollectBtnActions.addEventListener('click', openReportForm);
     if (reportClose) reportClose.addEventListener('click', closeReportForm);
     reportOverlay.addEventListener('click', function(e) {
         if (e.target === reportOverlay) closeReportForm();

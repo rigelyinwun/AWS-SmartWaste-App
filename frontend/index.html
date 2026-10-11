@@ -122,10 +122,18 @@
 
                     <!-- Nearby disposal / recycling facilities -->
                     <div class="facilities-block" id="facilitiesBlock" hidden>
-                        <h3 class="facilities-heading">
-                            <i class="fa-solid fa-location-dot"></i>
-                            Nearby Disposal &amp; Recycling Centers
-                        </h3>
+                        <div class="facilities-heading-row">
+                            <h3 class="facilities-heading">
+                                <i class="fa-solid fa-location-dot"></i>
+                                Nearby Disposal &amp; Recycling Centers
+                            </h3>
+                            <div class="allow-collect-inline" id="allowCollectInline" hidden>
+                                <span class="allow-collect-inline-text">None of these works? Consider &rarr;</span>
+                                <button type="button" class="btn-allow-collect" id="allowCollectBtnActions">
+                                    <i class="fa-solid fa-handshake-angle"></i> Allow Public Collect
+                                </button>
+                            </div>
+                        </div>
                         <p class="facilities-subheading" id="facilitiesSubheading"></p>
 
                         <div class="facilities-map-wrap">

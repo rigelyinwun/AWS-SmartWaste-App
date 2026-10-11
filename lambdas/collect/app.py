@@ -182,11 +182,13 @@ IMPACT_FACTORS = {
 LANDFILL_BASELINE_CO2E_PER_KG = 1.0
 
 # Synonyms -> canonical key. Checked as case-insensitive substring matches.
+# Order matters: more specific materials are checked before "plastic" so a
+# "glass bottle" / "tin can" resolves to its real material, not plastic.
 _CATEGORY_SYNONYMS = [
-    (("plastic", "pet", "hdpe", "bottle"), "plastic"),
-    (("cardboard", "carton", "paper"), "paper"),
     (("glass", "jar"), "glass"),
     (("aluminium", "aluminum", "steel", "tin", "can", "metal"), "metal"),
+    (("plastic", "pet", "hdpe"), "plastic"),
+    (("cardboard", "carton", "paper"), "paper"),
     (("food", "compost", "garden", "organic"), "organic"),
     (("electronic", "electronics", "e-waste", "ewaste", "battery", "device"), "ewaste"),
     (("cloth", "clothing", "fabric", "textile"), "textile"),
