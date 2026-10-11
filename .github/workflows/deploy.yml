@@ -52,7 +52,7 @@ jobs:
           }
 
           # Configure CORS on each Function URL
-          for func in WasteDetailsFunction FurtherActionsFunction EnvironmentalImpactFunction SmartWasteAssistantFunction NearbyFacilitiesFunction; do
+          for func in WasteDetailsFunction FurtherActionsFunction EnvironmentalImpactFunction SmartWasteAssistantFunction NearbyFacilitiesFunction ProfileFunction CollectFunction; do
             FUNC_NAME=$(aws cloudformation describe-stack-resource --stack-name smartwaste \
               --logical-resource-id $func --query "StackResourceDetail.PhysicalResourceId" --output text)
             echo "Configuring CORS for $func ($FUNC_NAME)"
@@ -99,6 +99,38 @@ jobs:
           echo "AwsRegion = $REGION_OUT"
           if [ -z "$REGION_OUT" ] || [ "$REGION_OUT" = "None" ]; then echo "ERROR: AwsRegion is empty"; exit 1; fi
           sed -i "s|__AWS_REGION__|$REGION_OUT|g" frontend/index.html
+
+          POOL_ID=$(get_output CognitoUserPoolId)
+          echo "CognitoUserPoolId = $POOL_ID"
+          if [ -z "$POOL_ID" ] || [ "$POOL_ID" = "None" ]; then echo "ERROR: CognitoUserPoolId is empty"; exit 1; fi
+          sed -i "s|__COGNITO_POOL_ID__|$POOL_ID|g" frontend/index.html
+
+          CLIENT_ID=$(get_output CognitoClientId)
+          echo "CognitoClientId = $CLIENT_ID"
+          if [ -z "$CLIENT_ID" ] || [ "$CLIENT_ID" = "None" ]; then echo "ERROR: CognitoClientId is empty"; exit 1; fi
+          sed -i "s|__COGNITO_CLIENT_ID__|$CLIENT_ID|g" frontend/index.html
+
+          URL=$(get_output ProfileUrl)
+          echo "ProfileUrl = $URL"
+          if [ -z "$URL" ] || [ "$URL" = "None" ]; then echo "ERROR: ProfileUrl is empty"; exit 1; fi
+          sed -i "s|__URL_PROFILE__|$URL|g" frontend/index.html
+
+          URL=$(get_output CollectUrl)
+          echo "CollectUrl = $URL"
+          if [ -z "$URL" ] || [ "$URL" = "None" ]; then echo "ERROR: CollectUrl is empty"; exit 1; fi
+          sed -i "s|__URL_COLLECT__|$URL|g" frontend/index.html
+
+          AS_HTTP=$(get_output AppSyncHttpDns)
+          echo "AppSyncHttpDns = $AS_HTTP"
+          sed -i "s|__APPSYNC_HTTP__|$AS_HTTP|g" frontend/index.html
+
+          AS_RT=$(get_output AppSyncRealtimeDns)
+          echo "AppSyncRealtimeDns = $AS_RT"
+          sed -i "s|__APPSYNC_REALTIME__|$AS_RT|g" frontend/index.html
+
+          AS_KEY=$(get_output AppSyncApiKey)
+          echo "AppSyncApiKey retrieved (length ${#AS_KEY})"
+          sed -i "s#__APPSYNC_API_KEY__#$AS_KEY#g" frontend/index.html
 
           echo "--- Verifying replacements ---"
           grep "STREAM_URLS" frontend/index.html

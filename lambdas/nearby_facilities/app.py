@@ -1,7 +1,9 @@
 import json
 import logging
 import math
+import os
 import traceback
+import urllib.parse
 import boto3
 from flask import Flask, request, Response
 
@@ -11,9 +13,14 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 REGION = "ap-southeast-1"
+# The standalone geo-places API is not offered in every region (notably not in
+# ap-southeast-1). Call it in a supported region — the place database is global,
+# so Malaysian results are identical. Override with GEO_PLACES_REGION if needed.
+GEO_PLACES_REGION = os.environ.get("GEO_PLACES_REGION", "us-east-1")
+
 bedrock = boto3.client("bedrock-runtime", region_name=REGION)
 # New standalone Amazon Location Places API (managed provider, no place index).
-geo_places = boto3.client("geo-places", region_name=REGION)
+geo_places = boto3.client("geo-places", region_name=GEO_PLACES_REGION)
 
 MODEL_ID = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 
@@ -26,23 +33,47 @@ DEFAULT_CENTER = {"lat": 3.139, "lng": 101.6869, "label": "Kuala Lumpur, Malaysi
 MALAYSIA_FALLBACK = [
     {"name": "Alam Flora Recycling Center (Kuala Lumpur)", "address": "Kuala Lumpur",
      "lat": 3.1570, "lng": 101.7120, "email": "customercare@alamflora.com.my",
-     "phone": "+1800883728", "general_line": True},
+     "phone": "+1800883728", "general_line": True, "facilityType": "recycling_center"},
     {"name": "KLCC Recycling Collection Point", "address": "Jalan Ampang, Kuala Lumpur",
-     "lat": 3.1578, "lng": 101.7118, "email": "", "phone": "+60321622723", "general_line": True},
+     "lat": 3.1578, "lng": 101.7118, "email": "", "phone": "+60321622723",
+     "general_line": True, "facilityType": "recycling_center"},
     {"name": "Petaling Jaya Community Recycling Center", "address": "Petaling Jaya, Selangor",
-     "lat": 3.1073, "lng": 101.6067, "email": "", "phone": "+60379565000", "general_line": True},
-    {"name": "Shah Alam Recycling Hub", "address": "Shah Alam, Selangor",
-     "lat": 3.0733, "lng": 101.5185, "email": "", "phone": "+60355225888", "general_line": True},
+     "lat": 3.1073, "lng": 101.6067, "email": "", "phone": "+60379565000",
+     "general_line": True, "facilityType": "recycling_center"},
+    {"name": "SWM Environment Collection (Shah Alam)", "address": "Shah Alam, Selangor",
+     "lat": 3.0733, "lng": 101.5185, "email": "", "phone": "+60355225888",
+     "general_line": True, "facilityType": "collect_company"},
     {"name": "Cheras Waste Transfer Station", "address": "Cheras, Kuala Lumpur",
-     "lat": 3.0890, "lng": 101.7470, "email": "", "phone": "", "general_line": False},
+     "lat": 3.0890, "lng": 101.7470, "email": "", "phone": "",
+     "general_line": False, "facilityType": "disposal_station"},
 ]
 
-# POI search queries biased toward waste/recycling facilities.
+# POI search queries, each tagged with the facility type it tends to surface.
 POI_QUERIES = [
-    "recycling center",
-    "waste disposal facility",
-    "recycling collection point",
+    ("recycling center", "recycling_center"),
+    ("recycling collection point", "recycling_center"),
+    ("waste disposal facility", "disposal_station"),
+    ("waste transfer station", "disposal_station"),
+    ("waste collection company", "collect_company"),
+    ("scrap metal dealer", "collect_company"),
 ]
+
+# Keyword hints to refine the facility type from the place name.
+TYPE_KEYWORDS = [
+    ("collect_company", ["sdn bhd", "company", "enterprise", "scrap", "trading", "dealer", "logistics"]),
+    ("disposal_station", ["transfer station", "disposal", "landfill", "dump", "incinerat"]),
+    ("recycling_center", ["recycle", "recycling", "collection point", "buy back", "buyback", "tzu chi"]),
+]
+
+
+def classify_facility(name, query_type):
+    """Pick a facility type from name keywords, falling back to the query type."""
+    low = (name or "").lower()
+    for ftype, words in TYPE_KEYWORDS:
+        for w in words:
+            if w in low:
+                return ftype
+    return query_type
 
 
 def haversine_km(lat1, lng1, lat2, lng2):
@@ -164,12 +195,12 @@ def search_pois(lat, lng):
     """Search for waste/recycling POIs biased to the given coordinates.
     Returns a list of raw facility dicts (name/address/lat/lng), de-duplicated."""
     found = {}
-    for query in POI_QUERIES:
+    for query, query_type in POI_QUERIES:
         try:
             resp = geo_places.search_text(
                 QueryText=query,
                 BiasPosition=[lng, lat],  # [lng, lat]
-                MaxResults=5,
+                MaxResults=4,
                 AdditionalFeatures=["Contact"],
                 Filter={"IncludeCountries": ["MYS"]},
             )
@@ -196,6 +227,7 @@ def search_pois(lat, lng):
                 "lng": p_lng,
                 "email": email,
                 "phone": phone,
+                "facilityType": classify_facility(name, query_type),
             }
 
     facilities = list(found.values())
@@ -258,6 +290,113 @@ def enrich_waste_types(item_description, facility_names):
     return {}
 
 
+# Curated allowlist of real platforms with search-URL templates ({q} = url-encoded
+# query). Building search URLs (not deep links) guarantees every link resolves to
+# live listings on a real domain — "Google-search valid".
+TRADING_PLATFORMS = {
+    "carousell": {"name": "Carousell", "type": "Marketplace",
+                  "tmpl": "https://www.carousell.com.my/search/{q}"},
+    "facebook": {"name": "Facebook Marketplace", "type": "Social Media",
+                 "tmpl": "https://www.facebook.com/marketplace/search/?query={q}"},
+    "mudah": {"name": "Mudah.my", "type": "Marketplace",
+              "tmpl": "https://www.mudah.my/malaysia/all?q={q}"},
+    "shopee": {"name": "Shopee", "type": "Marketplace",
+               "tmpl": "https://shopee.com.my/search?keyword={q}"},
+    "lazada": {"name": "Lazada", "type": "Marketplace",
+               "tmpl": "https://www.lazada.com.my/catalog/?q={q}"},
+    "ebay": {"name": "eBay", "type": "Marketplace",
+             "tmpl": "https://www.ebay.com/sch/i.html?_nkw={q}"},
+    "lelong": {"name": "Lelong.my", "type": "Marketplace",
+               "tmpl": "https://www.lelong.com.my/catalog/all/list?TheKeyword={q}"},
+    "freecycle": {"name": "Freecycle", "type": "Donation",
+                  "tmpl": "https://www.freecycle.org/search?query={q}"},
+    "reddit": {"name": "Reddit (r/malaysia, hobby subs)", "type": "Social Media",
+               "tmpl": "https://www.reddit.com/search/?q={q}"},
+    "google_shopping": {"name": "Google (shopping & local)", "type": "Specialist",
+                        "tmpl": "https://www.google.com/search?q={q}"},
+}
+
+DEFAULT_PLATFORM_KEYS = ["carousell", "facebook", "mudah", "shopee", "ebay"]
+
+
+def _pick_platforms_and_terms(item_description):
+    """Ask Bedrock which allowlisted platforms fit the item and for multilingual
+    search terms (English, Chinese, Malay). Returns (platform_keys, terms_dict)."""
+    keys = list(TRADING_PLATFORMS.keys())
+    system = (
+        "You help resell/donate/trade a second-hand item online in Malaysia. "
+        "Respond with ONLY a JSON object (no markdown): "
+        '{"platforms": [keys...], "terms": {"en": "...", "zh": "...", "ms": "..."}}. '
+        "Choose 3-5 platform keys ONLY from this exact list: " + ", ".join(keys) + ". "
+        "Pick the ones most suitable for this item (specialist/hobby items favor "
+        "Facebook, eBay, Reddit; common goods favor Carousell, Mudah, Shopee). "
+        "'terms' are concise search phrases for the item in English (en), "
+        "Simplified Chinese (zh), and Malay (ms) — e.g. for vinyl records: "
+        '"vinyl records", "黑胶唱片", "rekod vinil".'
+    )
+    user = "Item: " + (item_description or "general reusable household item")
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 512,
+        "temperature": 0.2,
+        "system": system,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": user}]}],
+    }
+    try:
+        resp = bedrock.invoke_model(
+            modelId=MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(body),
+        )
+        result = json.loads(resp["body"].read())
+        text = result.get("content", [{}])[0].get("text", "").strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1:
+            obj = json.loads(text[start:end + 1])
+            chosen = [k for k in (obj.get("platforms") or []) if k in TRADING_PLATFORMS]
+            terms = obj.get("terms") or {}
+            terms = {
+                "en": str(terms.get("en") or "").strip(),
+                "zh": str(terms.get("zh") or "").strip(),
+                "ms": str(terms.get("ms") or "").strip(),
+            }
+            if chosen and (terms["en"] or terms["zh"] or terms["ms"]):
+                return chosen[:5], terms
+    except Exception as e:
+        logger.error("Platform/terms selection error: %s", str(e))
+    # Fallback: default platforms, English term from the description.
+    return DEFAULT_PLATFORM_KEYS, {"en": (item_description or "").strip(), "zh": "", "ms": ""}
+
+
+def generate_trading_platforms(item_description):
+    """Build reliable second-hand trading links: real platforms (allowlist) with
+    multilingual search URLs. Returns [{name, type, queries:[{lang,term,url}]}]."""
+    keys, terms = _pick_platforms_and_terms(item_description)
+    lang_labels = {"en": "EN", "zh": "中文", "ms": "BM"}
+    # Keep languages that produced a term; always ensure at least English.
+    active_terms = [(lang, terms[lang]) for lang in ("en", "zh", "ms") if terms.get(lang)]
+    if not active_terms:
+        active_terms = [("en", (item_description or "second hand item").strip())]
+
+    out = []
+    for key in keys:
+        p = TRADING_PLATFORMS.get(key)
+        if not p:
+            continue
+        queries = []
+        for lang, term in active_terms:
+            url = p["tmpl"].replace("{q}", urllib.parse.quote(term))
+            queries.append({"lang": lang_labels.get(lang, lang), "term": term, "url": url})
+        out.append({"name": p["name"], "type": p["type"], "queries": queries})
+    return out
+
+
 def build_fallback(item_description, reason="no_location", center=None):
     """Common Malaysian recycling centers used when we can't locate the user.
     'reason' explains why the fallback was used so the UI can message correctly:
@@ -279,12 +418,14 @@ def build_fallback(item_description, reason="no_location", center=None):
             "email": f.get("email", ""),
             "phone": f.get("phone", ""),
             "general_line": bool(f.get("general_line") and f.get("phone")),
+            "facilityType": f.get("facilityType", "recycling_center"),
         })
     return {
         "center": center or DEFAULT_CENTER,
         "location_provided": False,
         "fallback_reason": reason,
         "facilities": facilities,
+        "trading_platforms": generate_trading_platforms(item_description),
     }
 
 
@@ -340,12 +481,14 @@ def analyze(path):
                 "email": p.get("email", ""),
                 "phone": p.get("phone", ""),
                 "general_line": False,
+                "facilityType": p.get("facilityType", "recycling_center"),
             })
 
         payload = {
             "center": {"lat": lat, "lng": lng, "label": label},
             "location_provided": True,
             "facilities": facilities,
+            "trading_platforms": generate_trading_platforms(description),
         }
         return Response(json.dumps(payload), content_type="application/json; charset=utf-8")
 

@@ -1,12 +1,135 @@
 (function() {
     'use strict';
 
-    // STREAM_URLS is defined in index.html (injected by CI/CD)
+    // STREAM_URLS and COGNITO_CONFIG are defined in index.html (injected by CI/CD)
+
+    // ===================== Cognito Auth module =====================
+    // Thin wrapper around amazon-cognito-identity-js. Exposes promise-based
+    // signup/confirm/login/logout plus session accessors used across the app.
+    var _userPool = null;
+
+    function userPool() {
+        if (_userPool) return _userPool;
+        if (typeof AmazonCognitoIdentity === 'undefined') return null;
+        if (!COGNITO_CONFIG.userPoolId || COGNITO_CONFIG.userPoolId.indexOf('__COGNITO_') === 0) return null;
+        _userPool = new AmazonCognitoIdentity.CognitoUserPool({
+            UserPoolId: COGNITO_CONFIG.userPoolId,
+            ClientId: COGNITO_CONFIG.clientId,
+        });
+        return _userPool;
+    }
+
+    function cognitoUser(email) {
+        return new AmazonCognitoIdentity.CognitoUser({ Username: email, Pool: userPool() });
+    }
+
+    var Auth = {
+        signup: function(email, password, name) {
+            return new Promise(function(resolve, reject) {
+                var pool = userPool();
+                if (!pool) return reject(new Error('Auth is not configured yet.'));
+                var attrs = [
+                    new AmazonCognitoIdentity.CognitoUserAttribute({ Name: 'email', Value: email }),
+                    new AmazonCognitoIdentity.CognitoUserAttribute({ Name: 'name', Value: name }),
+                ];
+                pool.signUp(email, password, attrs, null, function(err, result) {
+                    if (err) return reject(err);
+                    resolve(result);
+                });
+            });
+        },
+
+        confirm: function(email, code) {
+            return new Promise(function(resolve, reject) {
+                cognitoUser(email).confirmRegistration(code, true, function(err, result) {
+                    if (err) return reject(err);
+                    resolve(result);
+                });
+            });
+        },
+
+        resend: function(email) {
+            return new Promise(function(resolve, reject) {
+                cognitoUser(email).resendConfirmationCode(function(err, result) {
+                    if (err) return reject(err);
+                    resolve(result);
+                });
+            });
+        },
+
+        login: function(email, password) {
+            return new Promise(function(resolve, reject) {
+                var pool = userPool();
+                if (!pool) return reject(new Error('Auth is not configured yet.'));
+                var user = cognitoUser(email);
+                var details = new AmazonCognitoIdentity.AuthenticationDetails({
+                    Username: email, Password: password,
+                });
+                user.authenticateUser(details, {
+                    onSuccess: function(session) { resolve(session); },
+                    onFailure: function(err) { reject(err); },
+                });
+            });
+        },
+
+        logout: function() {
+            var user = userPool() && userPool().getCurrentUser();
+            if (user) user.signOut();
+        },
+
+        currentUser: function() {
+            return userPool() ? userPool().getCurrentUser() : null;
+        },
+
+        // Resolves the valid session (refreshing if needed) or rejects if not logged in.
+        session: function() {
+            return new Promise(function(resolve, reject) {
+                var user = Auth.currentUser();
+                if (!user) return reject(new Error('Not signed in'));
+                user.getSession(function(err, session) {
+                    if (err || !session || !session.isValid()) {
+                        return reject(err || new Error('Session invalid'));
+                    }
+                    resolve(session);
+                });
+            });
+        },
+
+        isLoggedIn: function() {
+            var user = Auth.currentUser();
+            return !!user;
+        },
+
+        // Returns {email, name, sub} from the current ID token payload, or null.
+        profile: function() {
+            var user = Auth.currentUser();
+            if (!user) return null;
+            try {
+                var session = user.signInUserSession;
+                if (!session) return null;
+                var payload = session.getIdToken().decodePayload();
+                return { email: payload.email, name: payload.name, sub: payload.sub };
+            } catch (e) {
+                return null;
+            }
+        },
+
+        // Returns a promise of the raw ID token JWT (for authorizing API calls later).
+        idToken: function() {
+            return Auth.session().then(function(session) {
+                return session.getIdToken().getJwtToken();
+            });
+        },
+    };
+
+    // Expose for later stages / debugging.
+    window.SmartWasteAuth = Auth;
 
     // State
     var fileData = null;
     var fileMime = null;
     var chatHistory = [];
+    var lastWasteDetails = null;  // most recent analysis, for public-collect reports
 
     // DOM elements
     var uploadZone = document.getElementById('uploadZone');
@@ -552,6 +675,12 @@
             var wastePanel = document.getElementById('wasteDetailsPanel');
             wastePanel.innerHTML = renderWasteDetailsTable(wasteDetailsData);
 
+            // Capture the analysis so it can be carried into a public-collect report,
+            // and reveal the "Allow Public Collect" button.
+            lastWasteDetails = wasteDetailsData || {};
+            var allowWrap = document.getElementById('allowCollectWrap');
+            if (allowWrap) allowWrap.hidden = false;
+
             // Kick off the nearby-facilities lookup (renders its own map + list).
             loadNearbyFacilities({
                 file_data: fileData,
@@ -630,9 +759,10 @@
     });
 
     if (chatHeaderBtn) {
+        // Header chat icon opens the peer-to-peer Messages page (the floating
+        // FAB remains the AI assistant).
         chatHeaderBtn.addEventListener('click', function() {
-            chatPopup.classList.toggle('open');
-            chatBubbleHint.classList.add('hidden');
+            openChatPage();
         });
     }
 
@@ -649,57 +779,102 @@
     var authSwitchBtn = document.getElementById('authSwitchBtn');
     var nameField = document.getElementById('nameField');
     var confirmField = document.getElementById('confirmField');
+    var codeField = document.getElementById('codeField');
     var authError = document.getElementById('authError');
+    var authSuccessEl = document.getElementById('authSuccess');
     var authEmail = document.getElementById('authEmail');
     var authPassword = document.getElementById('authPassword');
     var authName = document.getElementById('authName');
     var authConfirm = document.getElementById('authConfirm');
+    var authCode = document.getElementById('authCode');
+    var authResendBtn = document.getElementById('authResendBtn');
 
-    var authMode = 'login'; // 'login' | 'signup'
+    // Auth modal state machine: 'login' | 'signup' | 'confirm'
+    var authMode = 'login';
+    // Holds credentials across the signup -> confirm step so we can auto-login.
+    var pendingSignup = null;
 
     function setAuthMode(mode) {
         authMode = mode;
         var isSignup = mode === 'signup';
+        var isConfirm = mode === 'confirm';
+        var isLogin = mode === 'login';
 
-        authTitle.textContent = isSignup ? 'Create account' : 'Welcome back';
-        authSubtitle.textContent = isSignup
-            ? 'Sign up for a SmartWaste account'
-            : 'Log in to your SmartWaste account';
-        authSubmit.textContent = isSignup ? 'Sign Up' : 'Login';
-        authSwitchText.textContent = isSignup
-            ? 'Already have an account?'
-            : "Don't have an account?";
+        if (isConfirm) {
+            authTitle.textContent = 'Verify your email';
+            authSubtitle.textContent = 'Enter the code we emailed you';
+            authSubmit.textContent = 'Verify';
+        } else if (isSignup) {
+            authTitle.textContent = 'Create account';
+            authSubtitle.textContent = 'Sign up for a SmartWaste account';
+            authSubmit.textContent = 'Sign Up';
+        } else {
+            authTitle.textContent = 'Welcome back';
+            authSubtitle.textContent = 'Log in to your SmartWaste account';
+            authSubmit.textContent = 'Login';
+        }
+
+        authSwitchText.textContent = isSignup ? 'Already have an account?' : "Don't have an account?";
         authSwitchBtn.textContent = isSignup ? 'Login' : 'Sign Up';
+        authSwitchBtn.parentElement.hidden = isConfirm;
 
+        // Field visibility per state
         nameField.hidden = !isSignup;
         confirmField.hidden = !isSignup;
+        codeField.hidden = !isConfirm;
+        // Email/password only shown in login/signup, hidden during confirm
+        authEmail.closest('.auth-field').hidden = isConfirm;
+        authPassword.closest('.auth-field').hidden = isConfirm;
+
         authName.required = isSignup;
         authConfirm.required = isSignup;
+        authCode.required = isConfirm;
         authPassword.setAttribute('autocomplete', isSignup ? 'new-password' : 'current-password');
 
         hideAuthError();
+        hideAuthSuccess();
     }
 
     function openAuth(mode) {
         setAuthMode(mode);
         authOverlay.classList.add('show');
-        setTimeout(function() { authEmail.focus(); }, 50);
+        setTimeout(function() {
+            (mode === 'confirm' ? authCode : authEmail).focus();
+        }, 50);
     }
 
     function closeAuth() {
         authOverlay.classList.remove('show');
         authForm.reset();
+        pendingSignup = null;
         hideAuthError();
+        hideAuthSuccess();
     }
 
     function showAuthError(msg) {
         authError.textContent = msg;
         authError.hidden = false;
+        hideAuthSuccess();
     }
 
     function hideAuthError() {
         authError.hidden = true;
         authError.textContent = '';
+    }
+
+    function showAuthSuccess(msg) {
+        authSuccessEl.textContent = msg;
+        authSuccessEl.hidden = false;
+    }
+
+    function hideAuthSuccess() {
+        authSuccessEl.hidden = true;
+        authSuccessEl.textContent = '';
+    }
+
+    function setAuthBusy(busy, label) {
+        authSubmit.disabled = busy;
+        if (busy) authSubmit.textContent = label;
     }
 
     if (loginBtn) loginBtn.addEventListener('click', function() { openAuth('login'); });
@@ -720,49 +895,1153 @@
         setAuthMode(authMode === 'login' ? 'signup' : 'login');
     });
 
+    authResendBtn.addEventListener('click', function() {
+        if (!pendingSignup) return;
+        hideAuthError();
+        var user = cognitoUser(pendingSignup.email);
+        user.resendConfirmationCode(function(err) {
+            if (err) { showAuthError(cognitoMessage(err)); return; }
+            showAuthSuccess('A new code has been sent to your email.');
+        });
+    });
+
     authForm.addEventListener('submit', function(e) {
         e.preventDefault();
         hideAuthError();
+        hideAuthSuccess();
 
+        if (authMode === 'confirm') return handleConfirm();
+        if (authMode === 'signup') return handleSignup();
+        return handleLogin();
+    });
+
+    function handleLogin() {
         var email = authEmail.value.trim();
         var password = authPassword.value;
+        if (!validEmail(email)) { showAuthError('Please enter a valid email address.'); return; }
+        if (!password) { showAuthError('Please enter your password.'); return; }
 
-        if (!email || !password) {
-            showAuthError('Please enter your email and password.');
-            return;
-        }
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-            showAuthError('Please enter a valid email address.');
-            return;
-        }
-        if (password.length < 6) {
-            showAuthError('Password must be at least 6 characters.');
-            return;
-        }
-
-        if (authMode === 'signup') {
-            if (!authName.value.trim()) {
-                showAuthError('Please enter your full name.');
-                return;
-            }
-            if (password !== authConfirm.value) {
-                showAuthError('Passwords do not match.');
-                return;
-            }
-        }
-
-        // No auth backend yet — acknowledge and close.
-        authSubmit.disabled = true;
-        authSubmit.textContent = authMode === 'signup' ? 'Signing up...' : 'Logging in...';
-        setTimeout(function() {
-            authSubmit.disabled = false;
-            setAuthMode(authMode);
+        setAuthBusy(true, 'Logging in...');
+        Auth.login(email, password).then(function() {
+            setAuthBusy(false);
             closeAuth();
-            alert(authMode === 'signup'
-                ? 'Account created! (demo — no backend connected yet)'
-                : 'Logged in! (demo — no backend connected yet)');
-        }, 600);
+            onAuthChanged();
+        }).catch(function(err) {
+            setAuthBusy(false);
+            setAuthMode('login');
+            // If the account exists but isn't confirmed, jump to the confirm step.
+            if (err && err.code === 'UserNotConfirmedException') {
+                pendingSignup = { email: email, password: password };
+                setAuthMode('confirm');
+                showAuthSuccess('Please verify your email. Enter the code we sent you.');
+                return;
+            }
+            showAuthError(cognitoMessage(err));
+        });
+    }
+
+    function handleSignup() {
+        var email = authEmail.value.trim();
+        var password = authPassword.value;
+        var name = authName.value.trim();
+        if (!name) { showAuthError('Please enter your full name.'); return; }
+        if (!validEmail(email)) { showAuthError('Please enter a valid email address.'); return; }
+        if (!strongPassword(password)) {
+            showAuthError('Password needs 8+ characters with upper, lower, and a number.');
+            return;
+        }
+        if (password !== authConfirm.value) { showAuthError('Passwords do not match.'); return; }
+
+        setAuthBusy(true, 'Signing up...');
+        Auth.signup(email, password, name).then(function() {
+            setAuthBusy(false);
+            pendingSignup = { email: email, password: password };
+            setAuthMode('confirm');
+            showAuthSuccess('Account created! Enter the 6-digit code we emailed to ' + email + '.');
+        }).catch(function(err) {
+            setAuthBusy(false);
+            showAuthError(cognitoMessage(err));
+        });
+    }
+
+    function handleConfirm() {
+        if (!pendingSignup) { setAuthMode('login'); return; }
+        var code = authCode.value.trim();
+        if (!code) { showAuthError('Please enter the verification code.'); return; }
+
+        setAuthBusy(true, 'Verifying...');
+        Auth.confirm(pendingSignup.email, code).then(function() {
+            // Auto-login after confirmation using the stored password.
+            return Auth.login(pendingSignup.email, pendingSignup.password);
+        }).then(function() {
+            setAuthBusy(false);
+            pendingSignup = null;
+            closeAuth();
+            onAuthChanged();
+        }).catch(function(err) {
+            setAuthBusy(false);
+            setAuthMode('confirm');
+            showAuthError(cognitoMessage(err));
+        });
+    }
+
+    function validEmail(email) {
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    }
+
+    function strongPassword(pw) {
+        return typeof pw === 'string' && pw.length >= 8 &&
+            /[a-z]/.test(pw) && /[A-Z]/.test(pw) && /[0-9]/.test(pw);
+    }
+
+    // Map Cognito error objects to friendly messages.
+    function cognitoMessage(err) {
+        if (!err) return 'Something went wrong. Please try again.';
+        var code = err.code || '';
+        var map = {
+            'NotAuthorizedException': 'Incorrect email or password.',
+            'UserNotFoundException': 'Incorrect email or password.',
+            'UsernameExistsException': 'An account with this email already exists.',
+            'CodeMismatchException': 'That verification code is incorrect.',
+            'ExpiredCodeException': 'That code has expired. Request a new one.',
+            'InvalidPasswordException': 'Password does not meet the requirements.',
+            'LimitExceededException': 'Too many attempts. Please wait and try again.',
+            'InvalidParameterException': 'Please check your details and try again.'
+        };
+        return map[code] || err.message || 'Something went wrong. Please try again.';
+    }
+
+    // --- Header auth state ---
+    // Reflects login state in the header: hide Login/Sign Up when authenticated,
+    // show a greeting + Logout. (Full profile page comes in a later stage.)
+    var headerActions = document.querySelector('.header-actions');
+
+    function onAuthChanged() {
+        var loggedIn = Auth.isLoggedIn();
+        var profile = Auth.profile();
+
+        if (loginBtn) loginBtn.hidden = loggedIn;
+        if (signupBtn) signupBtn.hidden = loggedIn;
+
+        var greeting = document.getElementById('authGreeting');
+        var logoutBtn = document.getElementById('logoutBtn');
+
+        if (loggedIn) {
+            if (!greeting) {
+                greeting = document.createElement('span');
+                greeting.id = 'authGreeting';
+                greeting.className = 'auth-greeting';
+                headerActions.appendChild(greeting);
+            }
+            var displayName = (profile && (profile.name || profile.email)) || 'Account';
+            greeting.textContent = 'Hi, ' + displayName.split('@')[0];
+            greeting.hidden = false;
+
+            if (!logoutBtn) {
+                logoutBtn = document.createElement('button');
+                logoutBtn.id = 'logoutBtn';
+                logoutBtn.type = 'button';
+                logoutBtn.className = 'btn-auth btn-login';
+                logoutBtn.textContent = 'Logout';
+                logoutBtn.addEventListener('click', function() {
+                    Auth.logout();
+                    onAuthChanged();
+                });
+                headerActions.appendChild(logoutBtn);
+            }
+            logoutBtn.hidden = false;
+        } else {
+            if (greeting) greeting.hidden = true;
+            if (logoutBtn) logoutBtn.hidden = true;
+        }
+
+        // Refresh the notification badge whenever auth state changes.
+        if (typeof refreshNotifBadge === 'function') refreshNotifBadge();
+    }
+
+    // Initialize header to reflect any persisted session (SDK uses localStorage).
+    onAuthChanged();
+
+    // ===================== Profile page =====================
+    var profileBtn = document.getElementById('profileBtn');
+    var profileOverlay = document.getElementById('profileOverlay');
+    var profileClose = document.getElementById('profileClose');
+    var profileView = document.getElementById('profileView');
+    var profileEdit = document.getElementById('profileEdit');
+    var editProfileBtn = document.getElementById('editProfileBtn');
+    var cancelEditBtn = document.getElementById('cancelEditBtn');
+    var saveProfileBtn = document.getElementById('saveProfileBtn');
+    var sendFeedbackBtn = document.getElementById('sendFeedbackBtn');
+    var profileLogoutBtn = document.getElementById('profileLogoutBtn');
+    var deleteAccountBtn = document.getElementById('deleteAccountBtn');
+    var deleteConfirmOverlay = document.getElementById('deleteConfirmOverlay');
+    var deleteCancelBtn = document.getElementById('deleteCancelBtn');
+    var deleteConfirmBtn = document.getElementById('deleteConfirmBtn');
+
+    var currentProfile = null;
+    var feedbackRating = 0;
+
+    function profileConfigured() {
+        return STREAM_URLS.profile && STREAM_URLS.profile.indexOf('__URL_') !== 0;
+    }
+
+    // Authorized fetch against the profile API using the Cognito ID token.
+    function profileFetch(method, body, pathSuffix) {
+        return Auth.idToken().then(function(token) {
+            return fetch(STREAM_URLS.profile + (pathSuffix || ''), {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + token,
+                },
+                body: body ? JSON.stringify(body) : undefined,
+            });
+        }).then(function(resp) {
+            if (resp.status === 401) throw new Error('Your session expired. Please log in again.');
+            if (!resp.ok) throw new Error('Request failed (' + resp.status + ')');
+            return resp.json();
+        });
+    }
+
+    function openProfile() {
+        // Login-gated: if not signed in, open the login modal instead.
+        if (!Auth.isLoggedIn()) {
+            openAuth('login');
+            return;
+        }
+        profileOverlay.classList.add('show');
+        showProfileView();
+        loadProfile();
+    }
+
+    function closeProfile() {
+        profileOverlay.classList.remove('show');
+    }
+
+    function showProfileView() {
+        profileView.hidden = false;
+        profileEdit.hidden = true;
+    }
+
+    function showProfileEdit() {
+        profileView.hidden = true;
+        profileEdit.hidden = false;
+        if (currentProfile) {
+            document.getElementById('peName').value = currentProfile.name || '';
+            document.getElementById('pePhone').value = currentProfile.phone || '';
+            document.getElementById('peAddress').value = currentProfile.address || '';
+        }
+        hideEl('profileEditMsg');
+    }
+
+    function renderProfile(p) {
+        currentProfile = p;
+        var name = p.name || p.email || 'User';
+        document.getElementById('profileNameText').textContent = name;
+        document.getElementById('profileEmailText').textContent = p.email || '';
+        document.getElementById('profileAvatar').textContent =
+            (name.charAt(0) || '?').toUpperCase();
+
+        document.getElementById('pvName').textContent = p.name || '—';
+        document.getElementById('pvEmail').textContent = p.email || '—';
+        document.getElementById('pvPhone').textContent = p.phone || '—';
+        document.getElementById('pvAddress').textContent = p.address || '—';
+
+        var s = p.settings || {};
+        document.getElementById('setEmailNotif').checked = !!s.emailNotif;
+        document.getElementById('setShareContact').checked = !!s.shareContact;
+    }
+
+    function loadProfile() {
+        if (!profileConfigured()) return;
+        profileFetch('GET').then(renderProfile).catch(function(err) {
+            // Fall back to showing token claims if the API isn't reachable.
+            var claims = Auth.profile() || {};
+            renderProfile({ name: claims.name, email: claims.email, phone: '', address: '', settings: {} });
+            console.warn('Profile load failed:', err.message);
+        });
+    }
+
+    function showMsg(id, text, isError) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = text;
+        el.hidden = false;
+        el.classList.toggle('is-error', !!isError);
+    }
+
+    function hideEl(id) {
+        var el = document.getElementById(id);
+        if (el) el.hidden = true;
+    }
+
+    if (profileBtn) profileBtn.addEventListener('click', openProfile);
+    if (profileClose) profileClose.addEventListener('click', closeProfile);
+    profileOverlay.addEventListener('click', function(e) {
+        if (e.target === profileOverlay) closeProfile();
     });
+
+    if (editProfileBtn) editProfileBtn.addEventListener('click', showProfileEdit);
+    if (cancelEditBtn) cancelEditBtn.addEventListener('click', showProfileView);
+
+    if (saveProfileBtn) saveProfileBtn.addEventListener('click', function() {
+        var body = {
+            name: document.getElementById('peName').value.trim(),
+            phone: document.getElementById('pePhone').value.trim(),
+            address: document.getElementById('peAddress').value.trim(),
+            settings: {
+                emailNotif: document.getElementById('setEmailNotif').checked,
+                shareContact: document.getElementById('setShareContact').checked,
+            },
+        };
+        saveProfileBtn.disabled = true;
+        profileFetch('PUT', body).then(function(p) {
+            saveProfileBtn.disabled = false;
+            renderProfile(p);
+            showProfileView();
+            onAuthChanged();  // refresh header greeting if name changed
+        }).catch(function(err) {
+            saveProfileBtn.disabled = false;
+            showMsg('profileEditMsg', err.message, true);
+        });
+    });
+
+    // Settings toggles save immediately (reuse the profile PUT).
+    function persistSettings() {
+        if (!currentProfile) return;
+        var body = {
+            name: currentProfile.name || '',
+            phone: currentProfile.phone || '',
+            address: currentProfile.address || '',
+            settings: {
+                emailNotif: document.getElementById('setEmailNotif').checked,
+                shareContact: document.getElementById('setShareContact').checked,
+            },
+        };
+        profileFetch('PUT', body).then(renderProfile).catch(function() {});
+    }
+    var setEmailNotif = document.getElementById('setEmailNotif');
+    var setShareContact = document.getElementById('setShareContact');
+    if (setEmailNotif) setEmailNotif.addEventListener('change', persistSettings);
+    if (setShareContact) setShareContact.addEventListener('change', persistSettings);
+
+    // Feedback stars
+    var starEls = document.querySelectorAll('#feedbackStars .star');
+    function paintStars(n) {
+        for (var i = 0; i < starEls.length; i++) {
+            starEls[i].classList.toggle('filled', i < n);
+        }
+    }
+    for (var si = 0; si < starEls.length; si++) {
+        starEls[si].addEventListener('click', function() {
+            feedbackRating = parseInt(this.getAttribute('data-value'), 10);
+            paintStars(feedbackRating);
+        });
+    }
+
+    if (sendFeedbackBtn) sendFeedbackBtn.addEventListener('click', function() {
+        var message = document.getElementById('feedbackText').value.trim();
+        if (!feedbackRating && !message) {
+            showMsg('feedbackMsg', 'Add a rating or a comment first.', true);
+            return;
+        }
+        sendFeedbackBtn.disabled = true;
+        profileFetch('POST', { rating: feedbackRating, message: message }, 'feedback').then(function() {
+            sendFeedbackBtn.disabled = false;
+            document.getElementById('feedbackText').value = '';
+            feedbackRating = 0;
+            paintStars(0);
+            showMsg('feedbackMsg', 'Thanks for your feedback!', false);
+        }).catch(function(err) {
+            sendFeedbackBtn.disabled = false;
+            showMsg('feedbackMsg', err.message, true);
+        });
+    });
+
+    if (profileLogoutBtn) profileLogoutBtn.addEventListener('click', function() {
+        Auth.logout();
+        closeProfile();
+        onAuthChanged();
+    });
+
+    // Delete account -> confirm modal -> DELETE
+    if (deleteAccountBtn) deleteAccountBtn.addEventListener('click', function() {
+        hideEl('deleteConfirmMsg');
+        deleteConfirmOverlay.classList.add('show');
+    });
+    if (deleteCancelBtn) deleteCancelBtn.addEventListener('click', function() {
+        deleteConfirmOverlay.classList.remove('show');
+    });
+    deleteConfirmOverlay.addEventListener('click', function(e) {
+        if (e.target === deleteConfirmOverlay) deleteConfirmOverlay.classList.remove('show');
+    });
+    if (deleteConfirmBtn) deleteConfirmBtn.addEventListener('click', function() {
+        deleteConfirmBtn.disabled = true;
+        profileFetch('DELETE').then(function() {
+            deleteConfirmBtn.disabled = false;
+            deleteConfirmOverlay.classList.remove('show');
+            Auth.logout();
+            closeProfile();
+            onAuthChanged();
+            alert('Your account has been deleted.');
+        }).catch(function(err) {
+            deleteConfirmBtn.disabled = false;
+            showMsg('deleteConfirmMsg', err.message, true);
+        });
+    });
+
+    // ===================== Collect: report + portal =====================
+    var allowCollectBtn = document.getElementById('allowCollectBtn');
+    var reportOverlay = document.getElementById('reportOverlay');
+    var reportClose = document.getElementById('reportClose');
+    var reportForm = document.getElementById('reportForm');
+    var reportSubmit = document.getElementById('reportSubmit');
+    var reportSummary = document.getElementById('reportSummary');
+    var portalOverlay = document.getElementById('portalOverlay');
+    var portalClose = document.getElementById('portalClose');
+    var sideLegend = document.querySelector('.side-legend');
+
+    function collectConfigured() {
+        return STREAM_URLS.collect && STREAM_URLS.collect.indexOf('__URL_') !== 0;
+    }
+
+    function collectFetch(method, body, pathSuffix) {
+        return Auth.idToken().then(function(token) {
+            return fetch(STREAM_URLS.collect + (pathSuffix || ''), {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + token,
+                },
+                body: body ? JSON.stringify(body) : undefined,
+            });
+        }).then(function(resp) {
+            if (resp.status === 401) throw new Error('Your session expired. Please log in again.');
+            if (!resp.ok) throw new Error('Request failed (' + resp.status + ')');
+            return resp.json();
+        });
+    }
+
+    // Pull friendly values from the fixed waste-details JSON for the report.
+    function wasteSummaryFromAnalysis() {
+        var d = lastWasteDetails || {};
+        return {
+            wasteType: d.description || d.category || 'Waste item',
+            category: d.category || '',
+            description: d.description || '',
+            weight: d.estimated_weight || '',
+        };
+    }
+
+    function openReportForm() {
+        if (!Auth.isLoggedIn()) { openAuth('login'); return; }
+        if (!lastWasteDetails) { alert('Please analyze a waste item first.'); return; }
+
+        var w = wasteSummaryFromAnalysis();
+        reportSummary.innerHTML =
+            '<div class="report-summary-row"><span>Item</span><strong>' +
+            escapeHtml(w.wasteType) + '</strong></div>' +
+            (w.category ? '<div class="report-summary-row"><span>Category</span><strong>' +
+                escapeHtml(w.category) + '</strong></div>' : '') +
+            (w.weight ? '<div class="report-summary-row"><span>Est. weight</span><strong>' +
+                escapeHtml(w.weight) + '</strong></div>' : '');
+
+        // Prefill contact from profile (token first, then API for phone/address).
+        var claims = Auth.profile() || {};
+        document.getElementById('rfName').value = claims.name || '';
+        document.getElementById('rfPhone').value = '';
+        document.getElementById('rfAddress').value = '';
+        document.getElementById('rfArea').value = locationInput.value.trim() || '';
+        document.getElementById('rfPickup').value = '';
+        document.getElementById('rfNotes').value = '';
+        hideEl('reportError'); hideEl('reportSuccess');
+
+        if (collectConfigured()) {
+            profileFetch('GET').then(function(p) {
+                if (p.name && !document.getElementById('rfName').value) document.getElementById('rfName').value = p.name;
+                if (p.phone) document.getElementById('rfPhone').value = p.phone;
+                if (p.address) document.getElementById('rfAddress').value = p.address;
+            }).catch(function() {});
+        }
+
+        reportOverlay.classList.add('show');
+    }
+
+    function closeReportForm() {
+        reportOverlay.classList.remove('show');
+    }
+
+    if (allowCollectBtn) allowCollectBtn.addEventListener('click', openReportForm);
+    if (reportClose) reportClose.addEventListener('click', closeReportForm);
+    reportOverlay.addEventListener('click', function(e) {
+        if (e.target === reportOverlay) closeReportForm();
+    });
+
+    if (reportForm) reportForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        hideEl('reportError'); hideEl('reportSuccess');
+
+        var name = document.getElementById('rfName').value.trim();
+        var phone = document.getElementById('rfPhone').value.trim();
+        var address = document.getElementById('rfAddress').value.trim();
+        if (!name || !phone || !address) {
+            showMsg('reportError', 'Name, phone, and pickup address are required.', true);
+            return;
+        }
+
+        var w = wasteSummaryFromAnalysis();
+        var body = {
+            wasteType: w.wasteType,
+            category: w.category,
+            description: w.description,
+            weight: w.weight,
+            contactName: name,
+            phone: phone,
+            fullAddress: address,
+            area: document.getElementById('rfArea').value.trim(),
+            pickupTime: document.getElementById('rfPickup').value.trim(),
+            notes: document.getElementById('rfNotes').value.trim(),
+        };
+
+        reportSubmit.disabled = true;
+        collectFetch('POST', body, 'report').then(function() {
+            reportSubmit.disabled = false;
+            closeReportForm();
+            document.getElementById('reportDoneOverlay').classList.add('show');
+        }).catch(function(err) {
+            reportSubmit.disabled = false;
+            showMsg('reportError', err.message, true);
+        });
+    });
+
+    // Report success confirmation -> OK opens the portal.
+    var reportDoneOverlay = document.getElementById('reportDoneOverlay');
+    var reportDoneOk = document.getElementById('reportDoneOk');
+    if (reportDoneOk) reportDoneOk.addEventListener('click', function() {
+        reportDoneOverlay.classList.remove('show');
+        openPortal('list');
+    });
+    if (reportDoneOverlay) reportDoneOverlay.addEventListener('click', function(e) {
+        if (e.target === reportDoneOverlay) reportDoneOverlay.classList.remove('show');
+    });
+
+    // --- Portal page ---
+    var portalRequests = { list: [], history: [] };
+
+    function openPortal(which) {
+        if (!Auth.isLoggedIn()) { openAuth('login'); return; }
+        portalOverlay.classList.add('show');
+        switchPortalTab(which || 'list');
+    }
+
+    function closePortal() {
+        portalOverlay.classList.remove('show');
+    }
+
+    function switchPortalTab(which) {
+        var tabs = document.querySelectorAll('.portal-tab');
+        for (var i = 0; i < tabs.length; i++) {
+            var active = tabs[i].getAttribute('data-portal-tab') === which;
+            tabs[i].classList.toggle('active', active);
+            tabs[i].setAttribute('aria-selected', active ? 'true' : 'false');
+        }
+        document.getElementById('portalListPanel').hidden = (which !== 'list');
+        document.getElementById('portalHistoryPanel').hidden = (which !== 'history');
+        if (which === 'list') loadPortalList();
+        else loadPortalHistory();
+    }
+
+    function loadPortalList() {
+        var cards = document.getElementById('portalListCards');
+        cards.innerHTML = '<div class="placeholder-text">Loading requests...</div>';
+        collectFetch('GET', null, 'list').then(function(data) {
+            portalRequests.list = (data && data.requests) || [];
+            renderPortalCards(cards, portalRequests.list, 'list');
+        }).catch(function(err) {
+            cards.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
+        });
+    }
+
+    function loadPortalHistory() {
+        var cards = document.getElementById('portalHistoryCards');
+        cards.innerHTML = '<div class="placeholder-text">Loading your reports...</div>';
+        collectFetch('GET', null, 'mine').then(function(data) {
+            portalRequests.history = (data && data.requests) || [];
+            renderPortalCards(cards, portalRequests.history, 'history');
+        }).catch(function(err) {
+            cards.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
+        });
+    }
+
+    function statusBadge(status) {
+        var s = (status || 'open').toLowerCase();
+        var label = { open: 'Pending', requested: 'Requested', collecting: 'Collecting',
+                      rejected: 'Rejected', collected: 'Collected', done: 'Collected' }[s] || s;
+        return '<span class="status-badge status-' + s + '">' + escapeHtml(label) + '</span>';
+    }
+
+    function fmtTime(ts) {
+        if (!ts) return '';
+        try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return ''; }
+    }
+
+    function renderPortalCards(container, requests, mode) {
+        if (!requests.length) {
+            container.innerHTML = '<div class="placeholder-text">' +
+                (mode === 'history' ? 'You haven\'t listed any waste yet.' : 'No open requests right now.') +
+                '</div>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < requests.length; i++) {
+            var r = requests[i];
+            var loc = r.area || (r.addressMasked ? 'Location on request' : (r.fullAddress || '—'));
+            html += '<div class="request-card">';
+            html += '<div class="request-card-head">';
+            html += '<div class="request-title">' + escapeHtml(r.wasteType || 'Waste item') + '</div>';
+            html += statusBadge(r.status);
+            html += '</div>';
+            html += '<div class="request-submitted">Submitted ' + escapeHtml(fmtTime(r.createdAt)) + '</div>';
+            html += '<div class="request-meta">';
+            html += '<div><i class="fa-solid fa-location-dot"></i> ' + escapeHtml(loc) + '</div>';
+            if (r.pickupTime) html += '<div><i class="fa-solid fa-clock"></i> ' + escapeHtml(r.pickupTime) + '</div>';
+            html += '<div><i class="fa-solid fa-box"></i> ' +
+                escapeHtml((r.category || 'Waste') + (r.weight ? ' • ' + r.weight : '')) + '</div>';
+            html += '</div>';
+            html += '<div class="request-actions">';
+            html += '<button type="button" class="btn-request-view" data-req="' + escapeHtml(r.requestId) + '">View Details</button>';
+            html += '<button type="button" class="btn-request-track" data-req="' + escapeHtml(r.requestId) + '">Track Request</button>';
+            html += '</div>';
+            html += '</div>';
+        }
+        container.innerHTML = html;
+    }
+
+    // Portal tab buttons
+    var portalTabs = document.querySelectorAll('.portal-tab');
+    for (var pt = 0; pt < portalTabs.length; pt++) {
+        portalTabs[pt].addEventListener('click', function() {
+            switchPortalTab(this.getAttribute('data-portal-tab'));
+        });
+    }
+
+    // Search filter on the public list
+    var portalSearch = document.getElementById('portalSearch');
+    if (portalSearch) portalSearch.addEventListener('input', function() {
+        var q = this.value.trim().toLowerCase();
+        var filtered = portalRequests.list.filter(function(r) {
+            return (r.wasteType || '').toLowerCase().indexOf(q) !== -1 ||
+                   (r.category || '').toLowerCase().indexOf(q) !== -1 ||
+                   (r.area || '').toLowerCase().indexOf(q) !== -1;
+        });
+        renderPortalCards(document.getElementById('portalListCards'), filtered, 'list');
+    });
+
+    if (portalClose) portalClose.addEventListener('click', closePortal);
+    portalOverlay.addEventListener('click', function(e) {
+        if (e.target === portalOverlay) closePortal();
+    });
+    if (sideLegend) {
+        sideLegend.style.cursor = 'pointer';
+        sideLegend.setAttribute('role', 'button');
+        sideLegend.setAttribute('tabindex', '0');
+        sideLegend.addEventListener('click', function() { openPortal('list'); });
+        sideLegend.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPortal('list'); }
+        });
+    }
+
+    // Portal card actions (event delegation for View Details / Track)
+    function findRequest(id) {
+        var all = portalRequests.list.concat(portalRequests.history);
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].requestId === id) return all[i];
+        }
+        return null;
+    }
+
+    document.getElementById('portalListCards').addEventListener('click', onPortalCardClick);
+    document.getElementById('portalHistoryCards').addEventListener('click', onPortalCardClick);
+    function onPortalCardClick(e) {
+        var btn = e.target.closest('button[data-req]');
+        if (!btn) return;
+        var r = findRequest(btn.getAttribute('data-req'));
+        if (!r) return;
+        if (btn.classList.contains('btn-request-view')) openReqDetail(r);
+        else if (btn.classList.contains('btn-request-track')) openReqDetail(r);
+    }
+
+    // ===================== Request detail + lifecycle actions =====================
+    var reqDetailOverlay = document.getElementById('reqDetailOverlay');
+    var reqDetailClose = document.getElementById('reqDetailClose');
+    var reqDetailBody = document.getElementById('reqDetailBody');
+    var reqDetailActions = document.getElementById('reqDetailActions');
+
+    function openReqDetail(r) {
+        var mine = Auth.profile() && Auth.profile().sub === r.ownerId;
+        var rows = '';
+        rows += detailRow('Item', r.wasteType || 'Waste item');
+        if (r.category) rows += detailRow('Category', r.category);
+        if (r.weight) rows += detailRow('Est. weight', r.weight);
+        rows += detailRow('Status', (r.status || 'open'));
+        rows += detailRow('Area', r.area || 'Location on request');
+        if (r.pickupTime) rows += detailRow('Pickup time', r.pickupTime);
+        if (mine && r.fullAddress) rows += detailRow('Full address', r.fullAddress);
+        if (r.notes) rows += detailRow('Notes', r.notes);
+        reqDetailBody.innerHTML = '<div class="report-summary">' + rows + '</div>';
+
+        hideEl('reqDetailError'); hideEl('reqDetailSuccess');
+
+        // Actions depend on viewer + status.
+        var actions = '';
+        if (!mine && (r.status === 'open' || r.status === 'requested')) {
+            actions = '<button type="button" class="btn-profile-primary" id="reqCollectBtn">Request to Collect</button>';
+        } else if (mine) {
+            actions = '<span class="req-detail-note">This is your listing. Manage requests in Notifications.</span>';
+        } else {
+            actions = '<span class="req-detail-note">This item is already ' + escapeHtml(r.status) + '.</span>';
+        }
+        reqDetailActions.innerHTML = actions;
+
+        var collectBtn = document.getElementById('reqCollectBtn');
+        if (collectBtn) {
+            collectBtn.addEventListener('click', function() {
+                collectBtn.disabled = true;
+                collectFetch('POST', { requestId: r.requestId }, 'request').then(function() {
+                    showMsg('reqDetailSuccess', 'Request sent! The owner will review it.', false);
+                    reqDetailActions.innerHTML = '';
+                    loadPortalList();
+                }).catch(function(err) {
+                    collectBtn.disabled = false;
+                    showMsg('reqDetailError', err.message, true);
+                });
+            });
+        }
+
+        reqDetailOverlay.classList.add('show');
+    }
+
+    function detailRow(label, value) {
+        return '<div class="report-summary-row"><span>' + escapeHtml(label) +
+            '</span><strong>' + escapeHtml(String(value)) + '</strong></div>';
+    }
+
+    function closeReqDetail() { reqDetailOverlay.classList.remove('show'); }
+    if (reqDetailClose) reqDetailClose.addEventListener('click', closeReqDetail);
+    reqDetailOverlay.addEventListener('click', function(e) {
+        if (e.target === reqDetailOverlay) closeReqDetail();
+    });
+
+    // ===================== Notifications =====================
+    var notifBtn = document.getElementById('notificationsBtn');
+    var notifOverlay = document.getElementById('notifOverlay');
+    var notifClose = document.getElementById('notifClose');
+    var notifFeedEl = document.getElementById('notifFeed');
+    var notifDetailEl = document.getElementById('notifDetail');
+    var notifBadge = document.getElementById('notifBadge');
+    var notifData = [];
+    var lifecycleRequests = { incoming: [], outgoing: [] };
+
+    function openNotifications() {
+        if (!Auth.isLoggedIn()) { openAuth('login'); return; }
+        notifOverlay.classList.add('show');
+        loadNotifications();
+        loadLifecycleRequests();
+    }
+    function closeNotifications() { notifOverlay.classList.remove('show'); }
+
+    if (notifBtn) notifBtn.addEventListener('click', openNotifications);
+    if (notifClose) notifClose.addEventListener('click', closeNotifications);
+    notifOverlay.addEventListener('click', function(e) {
+        if (e.target === notifOverlay) closeNotifications();
+    });
+
+    function refreshNotifBadge() {
+        if (!collectConfigured() || !Auth.isLoggedIn()) {
+            if (notifBadge) notifBadge.hidden = true;
+            return;
+        }
+        collectFetch('GET', null, 'notifications').then(function(data) {
+            var unread = (data && data.unread) || 0;
+            if (notifBadge) {
+                notifBadge.textContent = unread > 9 ? '9+' : String(unread);
+                notifBadge.hidden = unread === 0;
+            }
+        }).catch(function() {});
+    }
+
+    function loadNotifications() {
+        notifFeedEl.innerHTML = '<div class="placeholder-text">Loading...</div>';
+        collectFetch('GET', null, 'notifications').then(function(data) {
+            notifData = (data && data.notifications) || [];
+            renderNotifFeed();
+            // Mark read once viewed, then clear the badge.
+            collectFetch('POST', null, 'notifications/read').then(function() {
+                if (notifBadge) notifBadge.hidden = true;
+            }).catch(function() {});
+        }).catch(function(err) {
+            notifFeedEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
+        });
+    }
+
+    function notifIcon(type) {
+        return { request: 'fa-bell', approved: 'fa-circle-check', rejected: 'fa-circle-xmark',
+                 done: 'fa-box-open' }[type] || 'fa-circle-info';
+    }
+
+    function renderNotifFeed() {
+        if (!notifData.length) {
+            notifFeedEl.innerHTML = '<div class="placeholder-text">No notifications yet.</div>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < notifData.length; i++) {
+            var n = notifData[i];
+            html += '<div class="notif-item' + (n.read ? '' : ' unread') + '" data-idx="' + i + '">';
+            html += '<div class="notif-item-icon notif-' + escapeHtml(n.type || 'info') + '">' +
+                '<i class="fa-solid ' + notifIcon(n.type) + '"></i></div>';
+            html += '<div class="notif-item-body">';
+            html += '<div class="notif-item-title">' + escapeHtml(n.title || '') + '</div>';
+            html += '<div class="notif-item-text">' + escapeHtml(n.body || '') + '</div>';
+            html += '</div>';
+            html += '<i class="fa-solid fa-chevron-right notif-item-arrow"></i>';
+            html += '</div>';
+        }
+        notifFeedEl.innerHTML = html;
+        var items = notifFeedEl.querySelectorAll('.notif-item');
+        for (var j = 0; j < items.length; j++) {
+            items[j].addEventListener('click', function() {
+                var n = notifData[parseInt(this.getAttribute('data-idx'), 10)];
+                showNotifDetail(n);
+            });
+        }
+    }
+
+    function loadLifecycleRequests() {
+        collectFetch('GET', null, 'requests').then(function(data) {
+            lifecycleRequests.incoming = (data && data.incoming) || [];
+            lifecycleRequests.outgoing = (data && data.outgoing) || [];
+        }).catch(function() {});
+    }
+
+    function findCollectRequest(id) {
+        var all = lifecycleRequests.incoming.concat(lifecycleRequests.outgoing);
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].collectRequestId === id) return all[i];
+        }
+        return null;
+    }
+
+    function showNotifDetail(n) {
+        var meta = n.meta || {};
+        var cr = meta.collectRequestId ? findCollectRequest(meta.collectRequestId) : null;
+
+        var html = '';
+        html += '<div class="report-summary">';
+        html += detailRow('Type', n.title || n.type || '');
+        if (cr) {
+            html += detailRow('Item', cr.wasteType || 'Waste item');
+            html += detailRow('Status', cr.status || '');
+            if (cr.role === 'owner') html += detailRow('Collector', cr.collectorName || '');
+            else html += detailRow('Owner', cr.ownerName || '');
+        }
+        html += '</div>';
+
+        // Unlocked info (collector, approved) or owner approve/reject actions.
+        var actions = '';
+        if (cr && cr.role === 'owner' && cr.status === 'requested') {
+            actions = '<button type="button" class="btn-profile-primary" data-approve="' + escapeHtml(cr.collectRequestId) + '"><i class="fa-solid fa-check"></i> Approve</button>' +
+                      '<button type="button" class="btn-profile-delete" data-reject="' + escapeHtml(cr.collectRequestId) + '"><i class="fa-solid fa-xmark"></i> Reject</button>';
+        } else if (cr && cr.status === 'approved') {
+            html += '<div class="unlock-card">';
+            html += '<div class="unlock-title"><i class="fa-solid fa-lock-open"></i> Request Approved</div>';
+            if (cr.role === 'collector') {
+                if (cr.fullAddress) html += detailRow('Full address', cr.fullAddress);
+                if (cr.ownerPhone) html += detailRow('Owner phone', cr.ownerPhone);
+                if (cr.pickupTime) html += detailRow('Pickup time', cr.pickupTime);
+                if (cr.notes) html += detailRow('Notes', cr.notes);
+            }
+            html += '<p class="unlock-note">Address &amp; contact unlocked. You can now chat.</p>';
+            html += '</div>';
+            actions = '<button type="button" class="btn-profile-primary" data-chat="' + escapeHtml(cr.collectRequestId) + '"><i class="fa-solid fa-comments"></i> Open Chat</button>' +
+                      '<button type="button" class="btn-profile-secondary" data-done="' + escapeHtml(cr.collectRequestId) + '"><i class="fa-solid fa-flag-checkered"></i> Mark as Collected</button>';
+        }
+
+        notifDetailEl.innerHTML = html + '<div class="notif-detail-actions">' + actions + '</div>';
+        wireNotifDetailActions();
+    }
+
+    function wireNotifDetailActions() {
+        var approveBtn = notifDetailEl.querySelector('[data-approve]');
+        var rejectBtn = notifDetailEl.querySelector('[data-reject]');
+        var doneBtn = notifDetailEl.querySelector('[data-done]');
+
+        function act(suffix, id, btn) {
+            btn.disabled = true;
+            collectFetch('POST', { collectRequestId: id }, suffix).then(function() {
+                // Refresh everything affected.
+                loadNotifications();
+                loadLifecycleRequests();
+                refreshNotifBadge();
+                notifDetailEl.innerHTML = '<div class="placeholder-text">Done. Updated.</div>';
+            }).catch(function(err) {
+                btn.disabled = false;
+                notifDetailEl.insertAdjacentHTML('beforeend',
+                    '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>');
+            });
+        }
+        var chatBtn = notifDetailEl.querySelector('[data-chat]');
+        if (approveBtn) approveBtn.addEventListener('click', function() { act('approve', approveBtn.getAttribute('data-approve'), approveBtn); });
+        if (rejectBtn) rejectBtn.addEventListener('click', function() { act('reject', rejectBtn.getAttribute('data-reject'), rejectBtn); });
+        if (doneBtn) doneBtn.addEventListener('click', function() { act('done', doneBtn.getAttribute('data-done'), doneBtn); });
+        if (chatBtn) chatBtn.addEventListener('click', function() {
+            var cid = chatBtn.getAttribute('data-chat');
+            closeNotifications();
+            openChatPage(cid);
+        });
+    }
+
+    // ===================== P2P Chat (AppSync Events + polling fallback) =====================
+    var chatPageOverlay = document.getElementById('chatPageOverlay');
+    var chatPageClose = document.getElementById('chatPageClose');
+    var chatConvosEl = document.getElementById('chatConvos');
+    var chatThreadEl = document.getElementById('chatThread');
+    var chatThreadHead = document.getElementById('chatThreadHead');
+    var chatComposer = document.getElementById('chatComposer');
+    var chatMsgInput = document.getElementById('chatMsgInput');
+    var chatMsgSend = document.getElementById('chatMsgSend');
+
+    var chatConvos = [];
+    var activeConvo = null;        // conversationId currently open
+    var chatMessages = [];         // messages for the active conversation
+    var chatSocket = null;         // AppSync WebSocket
+    var chatPollTimer = null;      // polling fallback timer
+    var lastMsgTs = 0;             // newest message createdAt seen
+
+    function appsyncConfigured() {
+        return APPSYNC_CONFIG.realtime && APPSYNC_CONFIG.realtime.indexOf('__APPSYNC_') !== 0 &&
+               APPSYNC_CONFIG.apiKey && APPSYNC_CONFIG.apiKey.indexOf('__APPSYNC_') !== 0;
+    }
+
+    function openChatPage(conversationId) {
+        if (!Auth.isLoggedIn()) { openAuth('login'); return; }
+        chatPageOverlay.classList.add('show');
+        loadConversations(conversationId);
+    }
+
+    function closeChatPage() {
+        chatPageOverlay.classList.remove('show');
+        teardownRealtime();
+        stopPolling();
+        activeConvo = null;
+    }
+
+    if (chatPageClose) chatPageClose.addEventListener('click', closeChatPage);
+    chatPageOverlay.addEventListener('click', function(e) {
+        if (e.target === chatPageOverlay) closeChatPage();
+    });
+
+    function loadConversations(openId) {
+        chatConvosEl.innerHTML = '<div class="placeholder-text">Loading chats...</div>';
+        collectFetch('GET', null, 'conversations').then(function(data) {
+            chatConvos = (data && data.conversations) || [];
+            renderConvos();
+            if (openId) openConversation(openId);
+            else if (chatConvos.length) openConversation(chatConvos[0].conversationId);
+        }).catch(function(err) {
+            chatConvosEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
+        });
+    }
+
+    function renderConvos() {
+        if (!chatConvos.length) {
+            chatConvosEl.innerHTML = '<div class="placeholder-text">No chats yet. Chats open after a request is approved.</div>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < chatConvos.length; i++) {
+            var c = chatConvos[i];
+            var initials = (c.otherName || '?').trim().charAt(0).toUpperCase() || '?';
+            html += '<button type="button" class="chat-convo' +
+                (c.conversationId === activeConvo ? ' active' : '') +
+                '" data-cid="' + escapeHtml(c.conversationId) + '">';
+            html += '<span class="chat-convo-avatar">' + escapeHtml(initials) + '</span>';
+            html += '<span class="chat-convo-info">';
+            html += '<span class="chat-convo-name">' + escapeHtml(c.otherName || 'User') + '</span>';
+            html += '<span class="chat-convo-sub">' + escapeHtml(c.wasteType || '') + '</span>';
+            html += '</span></button>';
+        }
+        chatConvosEl.innerHTML = html;
+        var btns = chatConvosEl.querySelectorAll('.chat-convo');
+        for (var j = 0; j < btns.length; j++) {
+            btns[j].addEventListener('click', function() {
+                openConversation(this.getAttribute('data-cid'));
+            });
+        }
+    }
+
+    function openConversation(cid) {
+        activeConvo = cid;
+        var convo = null;
+        for (var i = 0; i < chatConvos.length; i++) {
+            if (chatConvos[i].conversationId === cid) convo = chatConvos[i];
+        }
+        renderConvos();  // refresh active highlight
+        chatThreadHead.textContent = convo
+            ? ('Chat with ' + (convo.otherName || 'User') +
+               (convo.wasteType ? ' (' + convo.wasteType + ')' : ''))
+            : 'Conversation';
+        chatComposer.hidden = false;
+        chatThreadEl.innerHTML = '<div class="placeholder-text">Loading messages...</div>';
+        lastMsgTs = 0;
+
+        loadMessages(cid, true);
+
+        // Set up realtime (or polling fallback) for the active conversation.
+        teardownRealtime();
+        stopPolling();
+        if (appsyncConfigured()) {
+            setupRealtime(cid);
+        } else {
+            startPolling(cid);
+        }
+    }
+
+    function loadMessages(cid, scroll) {
+        collectFetch('GET', null, 'messages?cr=' + encodeURIComponent(cid)).then(function(data) {
+            if (cid !== activeConvo) return;  // user switched
+            chatMessages = (data && data.messages) || [];
+            renderMessages();
+            if (scroll) scrollThread();
+        }).catch(function(err) {
+            chatThreadEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
+        });
+    }
+
+    function renderMessages() {
+        var me = Auth.profile() && Auth.profile().sub;
+        if (!chatMessages.length) {
+            chatThreadEl.innerHTML = '<div class="placeholder-text chat-empty">No messages yet. Say hello!</div>';
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < chatMessages.length; i++) {
+            var m = chatMessages[i];
+            var mine = m.senderId === me;
+            if (m.createdAt && m.createdAt > lastMsgTs) lastMsgTs = m.createdAt;
+            html += '<div class="chat-bubble ' + (mine ? 'me' : 'them') + '">';
+            html += '<div class="chat-bubble-text">' + escapeHtml(m.text || '') + '</div>';
+            html += '<div class="chat-bubble-time">' + escapeHtml(fmtMsgTime(m.createdAt)) + '</div>';
+            html += '</div>';
+        }
+        chatThreadEl.innerHTML = html;
+    }
+
+    function fmtMsgTime(ts) {
+        if (!ts) return '';
+        try { return new Date(ts / 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+        catch (e) { return ''; }
+    }
+
+    function scrollThread() {
+        chatThreadEl.scrollTop = chatThreadEl.scrollHeight;
+    }
+
+    function appendMessage(m) {
+        // Avoid duplicates (realtime echo of our own send).
+        for (var i = 0; i < chatMessages.length; i++) {
+            if (chatMessages[i].messageId === m.messageId) return;
+        }
+        chatMessages.push(m);
+        renderMessages();
+        scrollThread();
+    }
+
+    function sendChat() {
+        var text = chatMsgInput.value.trim();
+        if (!text || !activeConvo) return;
+        chatMsgInput.value = '';
+        collectFetch('POST', { collectRequestId: activeConvo, text: text }, 'message').then(function(m) {
+            appendMessage(m);
+        }).catch(function(err) {
+            chatMsgInput.value = text;  // restore on failure
+            alert(err.message);
+        });
+    }
+
+    if (chatMsgSend) chatMsgSend.addEventListener('click', sendChat);
+    if (chatMsgInput) chatMsgInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
+    });
+
+    // --- Realtime via AppSync Events WebSocket ---
+    function b64(obj) {
+        return btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    function setupRealtime(cid) {
+        try {
+            var authObj = { host: APPSYNC_CONFIG.http, 'x-api-key': APPSYNC_CONFIG.apiKey };
+            var header = b64(authObj);
+            var protocols = ['aws-appsync-event-ws', 'header-' + header];
+            chatSocket = new WebSocket('wss://' + APPSYNC_CONFIG.realtime + '/event/realtime', protocols);
+
+            chatSocket.onopen = function() {
+                chatSocket.send(JSON.stringify({ type: 'connection_init' }));
+            };
+            chatSocket.onmessage = function(evt) {
+                var msg;
+                try { msg = JSON.parse(evt.data); } catch (e) { return; }
+                if (msg.type === 'connection_ack') {
+                    var subId = 'sub-' + cid;
+                    chatSocket.send(JSON.stringify({
+                        type: 'subscribe',
+                        id: subId,
+                        channel: '/chat/' + cid,
+                        authorization: { host: APPSYNC_CONFIG.http, 'x-api-key': APPSYNC_CONFIG.apiKey },
+                    }));
+                } else if (msg.type === 'data' && msg.event) {
+                    if (cid !== activeConvo) return;
+                    try {
+                        var payload = JSON.parse(msg.event);
+                        appendMessage(payload);
+                    } catch (e) { /* ignore */ }
+                }
+            };
+            chatSocket.onerror = function() {
+                // Fall back to polling if the socket errors.
+                teardownRealtime();
+                startPolling(cid);
+            };
+            chatSocket.onclose = function() {
+                // If the active conversation is still open and we have no socket,
+                // ensure polling keeps messages flowing.
+                if (activeConvo === cid && !chatPollTimer) startPolling(cid);
+            };
+        } catch (e) {
+            startPolling(cid);
+        }
+    }
+
+    function teardownRealtime() {
+        if (chatSocket) {
+            try { chatSocket.close(); } catch (e) { /* ignore */ }
+            chatSocket = null;
+        }
+    }
+
+    // --- Polling fallback ---
+    function startPolling(cid) {
+        stopPolling();
+        chatPollTimer = setInterval(function() {
+            if (cid !== activeConvo) { stopPolling(); return; }
+            loadMessages(cid, false);
+        }, 4000);
+    }
+
+    function stopPolling() {
+        if (chatPollTimer) { clearInterval(chatPollTimer); chatPollTimer = null; }
+    }
 
     chatPopupClose.addEventListener('click', function() {
         chatPopup.classList.remove('open');
@@ -920,9 +2199,60 @@
         });
     }
 
+    // Facility type -> label, icon, css class.
+    function facilityTypeInfo(t) {
+        var map = {
+            recycling_center: { label: 'recycling center', icon: 'fa-recycle', cls: 'ftype-recycle' },
+            disposal_station: { label: 'disposal station', icon: 'fa-dumpster', cls: 'ftype-disposal' },
+            collect_company: { label: 'waste collect company', icon: 'fa-industry', cls: 'ftype-company' },
+        };
+        return map[t] || map.recycling_center;
+    }
+
+    // Render the "Online Trading Platforms" panel for the analyzed item.
+    function renderTradingPlatforms(platforms) {
+        var panel = document.getElementById('tradingPlatforms');
+        if (!panel) return;
+        if (!Array.isArray(platforms) || !platforms.length) {
+            panel.hidden = true;
+            return;
+        }
+        var html = '<h3 class="trading-title"><i class="fa-solid fa-tags"></i> Online Trading Platforms</h3>';
+        html += '<p class="trading-sub">Search live listings to resell, donate, or trade this item \u2014 in multiple languages.</p>';
+        html += '<div class="trading-list">';
+        for (var i = 0; i < platforms.length; i++) {
+            var p = platforms[i];
+            var queries = Array.isArray(p.queries) ? p.queries : [];
+            html += '<div class="trading-card">';
+            html += '<div class="trading-card-head">';
+            html += '<span class="trading-name">' + escapeHtml(p.name) + '</span>';
+            html += '<span class="trading-type">' + escapeHtml(p.type || 'Marketplace') + '</span>';
+            html += '</div>';
+            if (queries.length) {
+                html += '<div class="trading-queries">';
+                for (var q = 0; q < queries.length; q++) {
+                    var qq = queries[q];
+                    if (!qq.url || !/^https?:\/\//i.test(qq.url)) continue;
+                    html += '<a class="trading-chip" href="' + encodeURI(qq.url) +
+                        '" target="_blank" rel="noopener noreferrer" ' +
+                        'title="Search ' + escapeHtml(qq.term || '') + '">' +
+                        '<span class="chip-lang">' + escapeHtml(qq.lang || '') + '</span>' +
+                        escapeHtml(qq.term || 'Search') +
+                        ' <i class="fa-solid fa-magnifying-glass"></i></a>';
+                }
+                html += '</div>';
+            }
+            html += '</div>';
+        }
+        html += '</div>';
+        panel.innerHTML = html;
+        panel.hidden = false;
+    }
+
     function renderFacilities(data) {
         var listEl = document.getElementById('facilitiesList');
         var subheading = document.getElementById('facilitiesSubheading');
+        renderTradingPlatforms(data && data.trading_platforms);
 
         var center = (data && data.center) || { lat: 3.139, lng: 101.6869, label: 'Malaysia' };
         var facilities = (data && Array.isArray(data.facilities)) ? data.facilities : [];
@@ -969,10 +2299,12 @@
                 li.className = 'facility-item';
                 li.setAttribute('data-index', index);
 
-                // Icon
+                var ftype = facilityTypeInfo(f.facilityType);
+
+                // Icon (varies by facility type)
                 var icon = document.createElement('div');
-                icon.className = 'facility-icon';
-                icon.innerHTML = '<i class="fa-solid fa-recycle"></i>';
+                icon.className = 'facility-icon ' + ftype.cls;
+                icon.innerHTML = '<i class="fa-solid ' + ftype.icon + '"></i>';
                 li.appendChild(icon);
 
                 // Body (name, meta, type tags)
@@ -1018,7 +2350,10 @@
                 }
 
                 body.innerHTML =
-                    '<div class="facility-name">' + escapeHtml(f.name || 'Unknown facility') + '</div>' +
+                    '<div class="facility-name-row">' +
+                        '<span class="facility-name">' + escapeHtml(f.name || 'Unknown facility') + '</span>' +
+                        '<span class="facility-type-pill ' + ftype.cls + '">' + escapeHtml(ftype.label) + '</span>' +
+                    '</div>' +
                     '<div class="facility-meta">' + metaParts + '</div>' +
                     tagsHtml +
                     contactTextHtml;

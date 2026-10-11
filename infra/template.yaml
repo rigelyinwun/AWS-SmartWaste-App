@@ -18,6 +18,58 @@ Resources:
   # browser API key created manually in the console (Maps GetTile only).
   # Server-side geocoding / place search uses the Lambda role below (geo-places).
 
+  # --- Cognito: user accounts + auth ---
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "smartwaste-users-${AWS::StackName}"
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+  # Public SPA client — NO client secret (safe to embed in the browser).
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "smartwaste-web-${AWS::StackName}"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
   # IAM Role for all Lambda functions
   AppBedrockRole:
     Type: AWS::IAM::Role
@@ -55,6 +107,288 @@ Resources:
                   - geo-places:Geocode
                   - geo-places:GetPlace
                 Resource: "*"
+        - PolicyName: ProfileDataPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt UsersTable.Arn
+                  - !GetAtt FeedbackTable.Arn
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:AdminUpdateUserAttributes
+                Resource: !GetAtt UserPool.Arn
+        - PolicyName: CollectDataPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt WasteRequestsTable.Arn
+                  - !Sub "${WasteRequestsTable.Arn}/index/*"
+                  - !GetAtt CollectRequestsTable.Arn
+                  - !Sub "${CollectRequestsTable.Arn}/index/*"
+                  - !GetAtt NotificationsTable.Arn
+                  - !Sub "${NotificationsTable.Arn}/index/*"
+                  - !GetAtt MessagesTable.Arn
+                  - !Sub "${MessagesTable.Arn}/index/*"
+        - PolicyName: ChatPublishPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - appsync:EventPublish
+                Resource:
+                  - !Sub "${ChatEventApi.ApiArn}/*"
+                  - !GetAtt ChatEventApi.ApiArn
+
+  # --- DynamoDB: user profiles + feedback ---
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "smartwaste-users-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+
+  FeedbackTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "smartwaste-feedback-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: feedbackId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: feedbackId
+          KeyType: HASH
+
+  # Public waste collection reports
+  WasteRequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "smartwaste-requests-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: requestId
+          AttributeType: S
+        - AttributeName: ownerId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: N
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: requestId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: ownerIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: statusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # One row per collector's request to collect a waste item
+  CollectRequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "smartwaste-collect-requests-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: collectRequestId
+          AttributeType: S
+        - AttributeName: ownerId
+          AttributeType: S
+        - AttributeName: collectorId
+          AttributeType: S
+        - AttributeName: wasteId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: N
+      KeySchema:
+        - AttributeName: collectRequestId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: ownerIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: collectorIndex
+          KeySchema:
+            - AttributeName: collectorId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: wasteIndex
+          KeySchema:
+            - AttributeName: wasteId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # Per-user notification feed
+  NotificationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "smartwaste-notifications-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: N
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: createdAt
+          KeyType: RANGE
+
+  # Chat message history (conversation = collectRequestId)
+  MessagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "smartwaste-messages-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: conversationId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: N
+      KeySchema:
+        - AttributeName: conversationId
+          KeyType: HASH
+        - AttributeName: createdAt
+          KeyType: RANGE
+
+  # --- AppSync Events: real-time chat push ---
+  ChatEventApi:
+    Type: AWS::AppSync::Api
+    Properties:
+      Name: !Sub "smartwaste-chat-${AWS::StackName}"
+      EventConfig:
+        AuthProviders:
+          - AuthType: API_KEY
+        ConnectionAuthModes:
+          - AuthType: API_KEY
+        DefaultPublishAuthModes:
+          - AuthType: API_KEY
+        DefaultSubscribeAuthModes:
+          - AuthType: API_KEY
+        LogConfig:
+          CloudWatchLogsRoleArn: !GetAtt ChatLogRole.Arn
+          LogLevel: INFO
+
+  # IAM role AppSync assumes to write chat logs to CloudWatch
+  ChatLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "smartwaste-chat-logs-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: appsync.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSAppSyncPushToCloudWatchLogs
+
+  ChatChannelNamespace:
+    Type: AWS::AppSync::ChannelNamespace
+    Properties:
+      ApiId: !GetAtt ChatEventApi.ApiId
+      Name: chat
+
+  ChatApiKey:
+    Type: AWS::AppSync::ApiKey
+    Properties:
+      ApiId: !GetAtt ChatEventApi.ApiId
+      Description: SmartWaste chat browser key
+
+  # Profile Lambda (JWT-verified; returns JSON, not streamed)
+  ProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/profile/
+      Handler: run.sh
+      Layers:
+        - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:27"
+      Role: !GetAtt AppBedrockRole.Arn
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          PORT: "8080"
+          DEPLOY_TS: !Ref DeployTimestamp
+          USERS_TABLE: !Ref UsersTable
+          FEEDBACK_TABLE: !Ref FeedbackTable
+          USER_POOL_ID: !Ref UserPool
+          APP_CLIENT_ID: !Ref UserPoolClient
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  # Collect Lambda — public waste reports (JWT-verified; returns JSON)
+  CollectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/collect/
+      Handler: run.sh
+      Layers:
+        - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:27"
+      Role: !GetAtt AppBedrockRole.Arn
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          PORT: "8080"
+          DEPLOY_TS: !Ref DeployTimestamp
+          WASTE_REQUESTS_TABLE: !Ref WasteRequestsTable
+          COLLECT_REQUESTS_TABLE: !Ref CollectRequestsTable
+          NOTIFICATIONS_TABLE: !Ref NotificationsTable
+          MESSAGES_TABLE: !Ref MessagesTable
+          USER_POOL_ID: !Ref UserPool
+          APP_CLIENT_ID: !Ref UserPoolClient
+          APPSYNC_HTTP_DNS: !GetAtt ChatEventApi.Dns.Http
+          APPSYNC_API_KEY: !GetAtt ChatApiKey.ApiKey
+      FunctionUrlConfig:
+        AuthType: NONE
 
   # Waste Details Lambda
   WasteDetailsFunction:
@@ -188,6 +522,20 @@ Outputs:
     Value: !GetAtt NearbyFacilitiesFunctionUrl.FunctionUrl
   AwsRegion:
     Value: !Ref AWS::Region
+  CognitoUserPoolId:
+    Value: !Ref UserPool
+  CognitoClientId:
+    Value: !Ref UserPoolClient
+  ProfileUrl:
+    Value: !GetAtt ProfileFunctionUrl.FunctionUrl
+  CollectUrl:
+    Value: !GetAtt CollectFunctionUrl.FunctionUrl
+  AppSyncHttpDns:
+    Value: !GetAtt ChatEventApi.Dns.Http
+  AppSyncRealtimeDns:
+    Value: !GetAtt ChatEventApi.Dns.Realtime
+  AppSyncApiKey:
+    Value: !GetAtt ChatApiKey.ApiKey
   WebsiteUrl:
     Value: !GetAtt FrontendBucket.WebsiteURL
   BucketName:

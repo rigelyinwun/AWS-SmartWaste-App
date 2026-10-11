@@ -14,6 +14,7 @@
           crossorigin="">
     <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
             crossorigin="" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@6.3.12/dist/amazon-cognito-identity.min.js"></script>
 </head>
 <body>
     <header>
@@ -30,7 +31,7 @@
             </button>
             <button type="button" class="header-icon-btn" id="notificationsBtn" aria-label="Notifications" title="Notifications">
                 <i class="fa-solid fa-bell"></i>
-                <span class="icon-badge" aria-hidden="true"></span>
+                <span class="icon-count-badge" id="notifBadge" hidden>0</span>
             </button>
             <button type="button" class="btn-auth btn-login" id="loginBtn">Login</button>
             <button type="button" class="btn-auth btn-signup" id="signupBtn">Sign Up</button>
@@ -105,6 +106,12 @@
                     <div class="output-panel" id="wasteDetailsPanel">
                         <div class="placeholder-text">Upload an image and click Analyze to see results</div>
                     </div>
+                    <div class="allow-collect-wrap" id="allowCollectWrap" hidden>
+                        <button type="button" class="btn-allow-collect" id="allowCollectBtn">
+                            <i class="fa-solid fa-handshake-angle"></i> Allow Public Collect
+                        </button>
+                        <p class="allow-collect-hint">List this item for other users to collect.</p>
+                    </div>
                 </div>
 
                 <div class="widget output-widget tab-panel" role="tabpanel" aria-labelledby="tab-actions" hidden>
@@ -128,7 +135,10 @@
                             </div>
                         </div>
 
-                        <ul class="facilities-list" id="facilitiesList"></ul>
+                        <div class="facilities-grid">
+                            <ul class="facilities-list" id="facilitiesList"></ul>
+                            <aside class="trading-platforms" id="tradingPlatforms" hidden></aside>
+                        </div>
                     </div>
                 </div>
 
@@ -212,7 +222,16 @@ What would you like to know about waste disposal?</div>
                     <input type="password" id="authConfirm" placeholder="••••••••" autocomplete="new-password">
                 </div>
 
+                <!-- Email verification code (shown after signup) -->
+                <div class="auth-field" id="codeField" hidden>
+                    <label for="authCode">Verification Code</label>
+                    <input type="text" id="authCode" placeholder="6-digit code from your email"
+                           inputmode="numeric" autocomplete="one-time-code">
+                    <button type="button" class="auth-resend-btn" id="authResendBtn">Resend code</button>
+                </div>
+
                 <p class="auth-error" id="authError" hidden></p>
+                <p class="auth-success" id="authSuccess" hidden></p>
 
                 <button type="submit" class="btn-auth-submit" id="authSubmit">Login</button>
             </form>
@@ -221,6 +240,293 @@ What would you like to know about waste disposal?</div>
                 <span id="authSwitchText">Don't have an account?</span>
                 <button type="button" class="auth-switch-btn" id="authSwitchBtn">Sign Up</button>
             </p>
+        </div>
+    </div>
+
+    <!-- Report Waste for Public Collect (form modal) -->
+    <div class="auth-overlay" id="reportOverlay">
+        <div class="auth-modal report-modal" role="dialog" aria-modal="true" aria-labelledby="reportTitle">
+            <button type="button" class="auth-modal-close" id="reportClose" aria-label="Close">&times;</button>
+            <div class="auth-brand">
+                <h3 id="reportTitle">List waste for collection</h3>
+                <p class="auth-subtitle">Other users can request to collect this item.</p>
+            </div>
+
+            <div class="report-summary" id="reportSummary">
+                <!-- filled from the analysis -->
+            </div>
+
+            <form class="auth-form" id="reportForm" novalidate>
+                <div class="auth-field">
+                    <label for="rfName">Your Name</label>
+                    <input type="text" id="rfName" autocomplete="name" required>
+                </div>
+                <div class="auth-field">
+                    <label for="rfPhone">Phone</label>
+                    <input type="tel" id="rfPhone" autocomplete="tel" placeholder="+60..." required>
+                </div>
+                <div class="auth-field">
+                    <label for="rfAddress">Pickup Address</label>
+                    <input type="text" id="rfAddress" autocomplete="street-address" required
+                           placeholder="Full address (shared only after you approve a collector)">
+                </div>
+                <div class="auth-field">
+                    <label for="rfArea">Area / Neighborhood (public)</label>
+                    <input type="text" id="rfArea" placeholder="e.g. Cyberjaya, Selangor">
+                </div>
+                <div class="auth-field">
+                    <label for="rfPickup">Preferred Pickup Time</label>
+                    <input type="text" id="rfPickup" placeholder="e.g. Weekdays 9-11 AM">
+                </div>
+                <div class="auth-field">
+                    <label for="rfNotes">Notes (optional)</label>
+                    <textarea id="rfNotes" rows="2" placeholder="e.g. Leave at guardhouse lobby"></textarea>
+                </div>
+
+                <p class="auth-error" id="reportError" hidden></p>
+                <p class="auth-success" id="reportSuccess" hidden></p>
+
+                <button type="submit" class="btn-auth-submit" id="reportSubmit">List for Collection</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Report success confirmation -->
+    <div class="invalid-overlay" id="reportDoneOverlay">
+        <div class="invalid-modal">
+            <div class="invalid-icon" style="color:#2e7d32;">&#10004;&#65039;</div>
+            <h3 style="color:#2e7d32;">Successfully reported</h3>
+            <p>Your waste item has been listed. Please check the Waste Collect Portal to track collection requests.</p>
+            <button type="button" class="btn-invalid-close" id="reportDoneOk">OK</button>
+        </div>
+    </div>
+
+    <!-- Waste Collect Portal (full-screen overlay with 2 tabs) -->
+    <div class="profile-overlay" id="portalOverlay">
+        <div class="profile-sheet portal-sheet" role="dialog" aria-modal="true" aria-labelledby="portalTitle">
+            <header class="profile-head">
+                <h2 id="portalTitle">Waste Collect Portal</h2>
+                <button type="button" class="profile-close" id="portalClose" aria-label="Close">&times;</button>
+            </header>
+
+            <div class="portal-tabbar" role="tablist">
+                <button type="button" class="portal-tab active" id="portalTabList" role="tab"
+                        aria-selected="true" data-portal-tab="list">Waste Collect List</button>
+                <button type="button" class="portal-tab" id="portalTabHistory" role="tab"
+                        aria-selected="false" data-portal-tab="history">History Collected</button>
+            </div>
+
+            <div class="portal-body">
+                <div class="portal-panel" id="portalListPanel">
+                    <input type="search" class="portal-search" id="portalSearch"
+                           placeholder="Search waste requests...">
+                    <div class="portal-cards" id="portalListCards">
+                        <div class="placeholder-text">Loading requests...</div>
+                    </div>
+                </div>
+                <div class="portal-panel" id="portalHistoryPanel" hidden>
+                    <div class="portal-cards" id="portalHistoryCards">
+                        <div class="placeholder-text">Loading your reports...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chat Page (full-screen overlay) -->
+    <div class="profile-overlay" id="chatPageOverlay">
+        <div class="profile-sheet chat-sheet" role="dialog" aria-modal="true" aria-labelledby="chatPageTitle">
+            <header class="profile-head">
+                <h2 id="chatPageTitle">Messages</h2>
+                <button type="button" class="profile-close" id="chatPageClose" aria-label="Close">&times;</button>
+            </header>
+            <div class="chat-layout">
+                <aside class="chat-convos" id="chatConvos">
+                    <div class="placeholder-text">Loading chats...</div>
+                </aside>
+                <section class="chat-thread-col">
+                    <div class="chat-thread-head" id="chatThreadHead">Select a conversation</div>
+                    <div class="chat-thread" id="chatThread">
+                        <div class="placeholder-text chat-empty">
+                            Chats appear here once a collection request is approved.
+                        </div>
+                    </div>
+                    <div class="chat-composer" id="chatComposer" hidden>
+                        <input type="text" id="chatMsgInput" placeholder="Type a message..."
+                               autocomplete="off" aria-label="Message">
+                        <button type="button" class="chat-send-btn" id="chatMsgSend" aria-label="Send">
+                            <i class="fa-solid fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </section>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notifications Page (full-screen overlay) -->
+    <div class="profile-overlay" id="notifOverlay">
+        <div class="profile-sheet notif-sheet" role="dialog" aria-modal="true" aria-labelledby="notifTitle">
+            <header class="profile-head">
+                <h2 id="notifTitle">Notifications</h2>
+                <button type="button" class="profile-close" id="notifClose" aria-label="Close">&times;</button>
+            </header>
+            <div class="notif-layout">
+                <div class="notif-feed-col">
+                    <h3 class="notif-col-title">Notifications Feed</h3>
+                    <div class="notif-feed" id="notifFeed">
+                        <div class="placeholder-text">Loading...</div>
+                    </div>
+                </div>
+                <div class="notif-detail-col">
+                    <h3 class="notif-col-title">Request Details</h3>
+                    <div class="notif-detail" id="notifDetail">
+                        <div class="placeholder-text">Select a notification to see details.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Request Detail modal (from portal "View Details") -->
+    <div class="auth-overlay" id="reqDetailOverlay">
+        <div class="auth-modal report-modal" role="dialog" aria-modal="true" aria-labelledby="reqDetailTitle">
+            <button type="button" class="auth-modal-close" id="reqDetailClose" aria-label="Close">&times;</button>
+            <div class="auth-brand">
+                <h3 id="reqDetailTitle">Request Details</h3>
+            </div>
+            <div id="reqDetailBody"><!-- filled dynamically --></div>
+            <p class="auth-error" id="reqDetailError" hidden></p>
+            <p class="auth-success" id="reqDetailSuccess" hidden></p>
+            <div id="reqDetailActions" class="req-detail-actions"></div>
+        </div>
+    </div>
+
+    <!-- Profile Page (full-screen overlay) -->
+    <div class="profile-overlay" id="profileOverlay">
+        <div class="profile-sheet" role="dialog" aria-modal="true" aria-labelledby="profilePageTitle">
+            <header class="profile-head">
+                <h2 id="profilePageTitle">My Profile</h2>
+                <button type="button" class="profile-close" id="profileClose" aria-label="Close">&times;</button>
+            </header>
+
+            <div class="profile-body" id="profileBody">
+                <!-- Identity card -->
+                <section class="profile-card profile-identity">
+                    <div class="profile-avatar" id="profileAvatar">?</div>
+                    <div class="profile-id-text">
+                        <div class="profile-name" id="profileNameText">—</div>
+                        <div class="profile-email" id="profileEmailText">—</div>
+                    </div>
+                </section>
+
+                <!-- View mode: details -->
+                <section class="profile-card" id="profileView">
+                    <h3 class="profile-section-title">Account Details</h3>
+                    <dl class="profile-details">
+                        <div><dt>Name</dt><dd id="pvName">—</dd></div>
+                        <div><dt>Email</dt><dd id="pvEmail">—</dd></div>
+                        <div><dt>Phone</dt><dd id="pvPhone">—</dd></div>
+                        <div><dt>Address</dt><dd id="pvAddress">—</dd></div>
+                    </dl>
+                    <button type="button" class="btn-profile-primary" id="editProfileBtn">
+                        <i class="fa-solid fa-pen"></i> Edit Profile
+                    </button>
+                </section>
+
+                <!-- Edit mode: form (hidden by default) -->
+                <section class="profile-card" id="profileEdit" hidden>
+                    <h3 class="profile-section-title">Edit Profile</h3>
+                    <div class="profile-field">
+                        <label for="peName">Name</label>
+                        <input type="text" id="peName" autocomplete="name">
+                    </div>
+                    <div class="profile-field">
+                        <label for="pePhone">Phone</label>
+                        <input type="tel" id="pePhone" autocomplete="tel" placeholder="+60...">
+                    </div>
+                    <div class="profile-field">
+                        <label for="peAddress">Address</label>
+                        <input type="text" id="peAddress" autocomplete="street-address">
+                    </div>
+                    <p class="profile-msg" id="profileEditMsg" hidden></p>
+                    <div class="profile-edit-actions">
+                        <button type="button" class="btn-profile-secondary" id="cancelEditBtn">Cancel</button>
+                        <button type="button" class="btn-profile-primary" id="saveProfileBtn">Save</button>
+                    </div>
+                </section>
+
+                <!-- Settings -->
+                <section class="profile-card" id="profileSettings">
+                    <h3 class="profile-section-title">Settings</h3>
+                    <label class="profile-toggle">
+                        <span>Email notifications</span>
+                        <input type="checkbox" id="setEmailNotif">
+                    </label>
+                    <label class="profile-toggle">
+                        <span>Show my contact to collectors</span>
+                        <input type="checkbox" id="setShareContact">
+                    </label>
+                </section>
+
+                <!-- Rate & Feedback -->
+                <section class="profile-card">
+                    <h3 class="profile-section-title">Rate &amp; Feedback</h3>
+                    <div class="feedback-stars" id="feedbackStars" role="radiogroup" aria-label="Rating">
+                        <button type="button" class="star" data-value="1" aria-label="1 star">&#9733;</button>
+                        <button type="button" class="star" data-value="2" aria-label="2 stars">&#9733;</button>
+                        <button type="button" class="star" data-value="3" aria-label="3 stars">&#9733;</button>
+                        <button type="button" class="star" data-value="4" aria-label="4 stars">&#9733;</button>
+                        <button type="button" class="star" data-value="5" aria-label="5 stars">&#9733;</button>
+                    </div>
+                    <textarea id="feedbackText" class="feedback-text" rows="3"
+                              placeholder="Tell us what you think..."></textarea>
+                    <p class="profile-msg" id="feedbackMsg" hidden></p>
+                    <button type="button" class="btn-profile-primary" id="sendFeedbackBtn">Send Feedback</button>
+                </section>
+
+                <!-- Legal -->
+                <section class="profile-card">
+                    <h3 class="profile-section-title">Legal</h3>
+                    <details class="profile-legal">
+                        <summary>Privacy Policy</summary>
+                        <p>We store your account details (name, email, phone, address) to operate
+                        the waste-collection features. Your contact information is only shared with
+                        other users when you approve a collection request. We do not sell your data.
+                        You can edit or delete your account at any time.</p>
+                    </details>
+                    <details class="profile-legal">
+                        <summary>Terms &amp; Conditions</summary>
+                        <p>SmartWaste connects users to share and collect recyclable waste. You are
+                        responsible for the accuracy of the information you post and for your conduct
+                        when coordinating pickups. SmartWaste is not liable for exchanges between
+                        users. Use the service lawfully and respectfully.</p>
+                    </details>
+                </section>
+
+                <!-- Account actions -->
+                <section class="profile-card profile-danger">
+                    <button type="button" class="btn-profile-logout" id="profileLogoutBtn">
+                        <i class="fa-solid fa-right-from-bracket"></i> Logout
+                    </button>
+                    <button type="button" class="btn-profile-delete" id="deleteAccountBtn">
+                        <i class="fa-solid fa-trash"></i> Delete Account
+                    </button>
+                </section>
+            </div>
+        </div>
+    </div>
+
+    <!-- Delete Account Confirmation -->
+    <div class="invalid-overlay" id="deleteConfirmOverlay">
+        <div class="invalid-modal">
+            <div class="invalid-icon">&#9888;&#65039;</div>
+            <h3>Delete your account?</h3>
+            <p>This permanently deletes your account and profile data. This action cannot be undone.</p>
+            <p class="profile-msg" id="deleteConfirmMsg" hidden></p>
+            <div class="delete-confirm-actions">
+                <button type="button" class="btn-profile-secondary" id="deleteCancelBtn">Cancel</button>
+                <button type="button" class="btn-profile-delete" id="deleteConfirmBtn">Yes, delete</button>
+            </div>
         </div>
     </div>
 
@@ -242,6 +548,8 @@ What would you like to know about waste disposal?</div>
             environmental_impact: '__URL_ENVIRONMENTAL_IMPACT__',
             smartwaste_assistant: '__URL_SMARTWASTE_ASSISTANT__',
             nearby_facilities: '__URL_NEARBY_FACILITIES__',
+            profile: '__URL_PROFILE__',
+            collect: '__URL_COLLECT__',
         };
 
         // Amazon Location map config (injected by CI/CD; key is a browser-scoped
@@ -249,6 +557,21 @@ What would you like to know about waste disposal?</div>
         var MAP_CONFIG = {
             apiKey: '__MAP_API_KEY__',
             region: '__AWS_REGION__',
+        };
+
+        // Cognito auth config (injected by CI/CD). Client has no secret — safe here.
+        var COGNITO_CONFIG = {
+            userPoolId: '__COGNITO_POOL_ID__',
+            clientId: '__COGNITO_CLIENT_ID__',
+            region: '__AWS_REGION__',
+        };
+
+        // AppSync Events (chat) config (injected by CI/CD). API key is a
+        // browser-safe realtime subscribe key; sending is authorized server-side.
+        var APPSYNC_CONFIG = {
+            http: '__APPSYNC_HTTP__',
+            realtime: '__APPSYNC_REALTIME__',
+            apiKey: '__APPSYNC_API_KEY__',
         };
     </script>
     <script src="app.js"></script>
