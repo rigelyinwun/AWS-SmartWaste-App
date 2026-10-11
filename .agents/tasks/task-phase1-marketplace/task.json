@@ -1,0 +1,7 @@
+{
+  "task_id": "task-phase1-marketplace",
+  "task_description": "Phase 1 Type B marketplace monetization layer for SmartWaste: priced listings + multi-quote, a disintermediation state machine gating contact/chat behind a 'confirmed' status, collector business accounts with S3-backed verification, a Cognito admins group + verification queue, and the vanilla-JS frontend wiring for all of it. No real payments (paymentStatus placeholder + '# Phase 2' comments only). Implements .agents/tasks/phase1-design.md (Revision 3) with the 2 MEDIUM + 5 NIT fixes from .agents/tasks/design-review.md folded in.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-005"],
+  "blocked_reason": null
+}

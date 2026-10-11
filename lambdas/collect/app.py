@@ -156,6 +156,66 @@ def _s(v):
     return str(v).strip() if v is not None else ""
 
 
+# ------------------- Marketplace status constants (single source of truth) ---
+# Contact (fullAddress/phone) unlock and chat are gated on these collect-request
+# statuses — the disintermediation invariant lives here. 'confirmed' is the
+# earliest unlocking status; 'collected'/'disputed' are post-confirm states.
+# NOTE: 'collecting' is a WASTE-ITEM status only — it must NEVER appear in these
+# tuples (ignore any historical revision-2 block that showed a 4-element tuple).
+UNLOCK_STATUSES = ("confirmed", "collected", "disputed")
+CHAT_STATUSES = UNLOCK_STATUSES
+# A collector's quote counts as "live" (blocks a duplicate quote) in these.
+LIVE_QUOTE_STATUSES = ("requested", "accepted", "confirmed")
+
+
+def _dec_price(v):
+    """Parse a money value to a non-negative Decimal, or None if blank/invalid.
+    Rounds to 2 dp. Used for maxPrice and quoteAmount."""
+    s = _s(v)
+    if not s:
+        return None
+    try:
+        d = Decimal(s).quantize(Decimal("0.01"))
+    except Exception:
+        return None
+    return d if d >= 0 else None
+
+
+def _validate_quote(amount, max_price):
+    """(ok, error) — amount is the parsed Decimal quote; max_price is Decimal or None."""
+    if amount is None or amount <= 0:
+        return False, "A quote amount greater than 0 is required"
+    if max_price is not None and amount > max_price:
+        return False, "Quote exceeds the owner's maximum price"
+    return True, None
+
+
+# ------------------- Collector module scaffolding (Part C) -------------------
+# FEAT-003 fills in the collector/admin routes; these two helpers are needed by
+# request_collect here. The code imports fine without the env vars (defaults '').
+COLLECTORS_TABLE = os.environ.get("COLLECTORS_TABLE", "")
+COLLECTOR_DOCS_BUCKET = os.environ.get("COLLECTOR_DOCS_BUCKET", "")
+collectors_table = dynamodb.Table(COLLECTORS_TABLE) if COLLECTORS_TABLE else None
+s3 = boto3.client("s3", region_name=REGION)
+DOC_TYPES = {"registration", "license", "insurance"}
+
+
+def _get_collector(user_id):
+    if not collectors_table:
+        return None
+    try:
+        return collectors_table.get_item(Key={"userId": user_id}).get("Item")
+    except Exception as e:
+        logger.error("get collector error: %s", str(e))
+        return None
+
+
+def _is_approved_collector(user_id):
+    # Fails closed: no record (or any non-approved status) ⇒ not approved.
+    c = _get_collector(user_id)
+    return bool(c) and c.get("status") == "approved"
+
+
 # ------------------- Analytics (manual deterministic calc) -------------------
 # Static per-waste-type impact factors. Numbers are reasonable, citable
 # real-world approximations (not exact for any one jurisdiction):
@@ -497,6 +557,19 @@ def create_report(claims, body):
         "pickupTime": _s(body.get("pickupTime")),
         "notes": _s(body.get("notes"))[:500],
     }
+    # Pricing (optional, backward-compatible). Readers treat a missing
+    # priceType as "user_pays" and a missing maxPrice as "no ceiling".
+    # priceType is whitelisted to {'free','user_pays'}; anything unknown falls
+    # back to 'user_pays' so a bogus value fails safe toward the paid, business-
+    # gated lane (it must never accidentally open the free collect lane).
+    price_type = _s(body.get("priceType"))
+    item["priceType"] = price_type if price_type in ("free", "user_pays") else "user_pays"
+    item["currency"] = (_s(body.get("currency")) or "MYR")[:3].upper()
+    # A free giveaway has no price ceiling — do not record maxPrice for it.
+    if item["priceType"] != "free":
+        max_price = _dec_price(body.get("maxPrice"))
+        if max_price is not None:
+            item["maxPrice"] = max_price
     lat, lng = dec(body.get("lat")), dec(body.get("lng"))
     if lat is not None and lng is not None:
         item["lat"] = lat
@@ -528,6 +601,11 @@ def public_view(item, owner=False):
         "pickupTime": item.get("pickupTime", ""),
         "notes": item.get("notes", ""),
     }
+    # Pricing fields are not sensitive — shown to owner and non-owner alike.
+    view["priceType"] = item.get("priceType", "user_pays")
+    view["currency"] = item.get("currency", "MYR")
+    if "maxPrice" in item:
+        view["maxPrice"] = item.get("maxPrice")
     if "lat" in item and "lng" in item:
         view["lat"] = item["lat"]
         view["lng"] = item["lng"]
@@ -742,8 +820,9 @@ def _get_waste(waste_id):
 
 
 def _creq_view(cr, waste=None):
-    """Shape a collect-request for the client, unlocking owner contact details
-    to the collector only when the request is approved."""
+    """Shape a collect-request for the client. Owner contact details unlock only
+    when the request reaches a status in UNLOCK_STATUSES (earliest 'confirmed')
+    and a waste object is supplied — never gated by price."""
     view = {
         "collectRequestId": cr.get("collectRequestId"),
         "wasteId": cr.get("wasteId"),
@@ -759,7 +838,12 @@ def _creq_view(cr, waste=None):
         "weight": cr.get("weight", ""),
         "area": cr.get("area", ""),
     }
-    if cr.get("status") == "approved" and waste:
+    # Quote fields are always exposed (not sensitive, never unlock-gated).
+    view["quoteAmount"] = cr.get("quoteAmount")
+    view["currency"] = cr.get("currency", "MYR")
+    view["maxPrice"] = cr.get("maxPrice")
+    view["paymentStatus"] = cr.get("paymentStatus")
+    if cr.get("status") in UNLOCK_STATUSES and waste:
         view["unlocked"] = True
         view["fullAddress"] = waste.get("fullAddress", "")
         view["ownerPhone"] = waste.get("phone", "")
@@ -774,41 +858,96 @@ def request_collect(claims, body):
         return json_response({"error": "Missing waste item id"}, status=400)
     if not creq_table or not table:
         return json_response({"error": "Service unavailable"}, status=503)
+    # (3) waste must exist.
     waste = _get_waste(waste_id)
     if not waste:
         return json_response({"error": "Waste item not found"}, status=404)
+    # (4) self-collect guard — kept, intentionally BEFORE the collector gate so an
+    #     owner who is also a collector gets this clear message, not an opaque 403.
     if waste.get("ownerId") == claims["sub"]:
         return json_response({"error": "You cannot collect your own item"}, status=400)
-    # Only items still open can be requested (prevents racing a taken item).
+    # (5) item must still be open (prevents quoting a collecting/collected/closed
+    #     item). Under multi-quote the item stays 'open' while quotes accumulate.
     if waste.get("status") not in ("open", None):
         return json_response({"error": "This item is no longer available"}, status=409)
+    # A free giveaway ('free') is collectable by ANY logged-in user — the paid
+    # lane ('user_pays', incl. a missing/legacy value) stays business-gated and
+    # quote-validated below. This flag forks ONLY steps (6)+(7); the rest of the
+    # lifecycle is identical for free and paid.
+    is_free = (waste.get("priceType") or "user_pays") == "free"
+    # (6) collector verification: only approved collectors may quote on a Type B
+    #     ("user_pays") listing. Single enforcement point; fails closed. Free
+    #     items skip this gate so any logged-in user can collect them.
+    if not is_free:
+        if not _is_approved_collector(claims["sub"]):
+            return json_response(
+                {"error": "Only verified collector businesses can quote on paid pickups"},
+                status=403)
+    # (7) parse + validate the quote. A free collect needs no amount — accept a
+    #     missing/blank/zero amount cleanly and store None. The paid path keeps
+    #     the full positive-amount + maxPrice-ceiling validation unchanged.
+    amount = _dec_price(body.get("quoteAmount"))
+    message = _s(body.get("message"))[:500]
+    if is_free:
+        amount = None
+    else:
+        ok, err = _validate_quote(amount, _dec_price(waste.get("maxPrice")))
+        if not ok:
+            return json_response({"error": err}, status=400)
+    # (8) reject a duplicate live quote by the same collector on this item. The
+    #     wasteIndex GSI is keyed by wasteId (not collector), so paginate the full
+    #     result set and filter collector-identity + live-status in Lambda.
+    me = claims["sub"]
+    if creq_table:
+        last_key = None
+        while True:
+            q = {
+                "IndexName": "wasteIndex",
+                "KeyConditionExpression": Key("wasteId").eq(waste_id),
+            }
+            if last_key:
+                q["ExclusiveStartKey"] = last_key
+            try:
+                resp = creq_table.query(**q)
+            except Exception as e:
+                logger.error("duplicate-quote query error: %s", str(e))
+                break
+            for row in resp.get("Items", []):
+                if row.get("collectorId") == me and row.get("status") in LIVE_QUOTE_STATUSES:
+                    return json_response(
+                        {"error": "You already have a live quote on this item"},
+                        status=409)
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
 
+    # (9) persist the quote. Snapshot the quote amount, currency and maxPrice from
+    #     the waste item so _creq_view never re-loads it just to show a ceiling.
     now = _now_micros()
     cr = {
         "collectRequestId": str(uuid.uuid4()),
         "wasteId": waste_id,
         "ownerId": waste.get("ownerId"),
         "ownerName": waste.get("ownerName", ""),
-        "collectorId": claims["sub"],
+        "collectorId": me,
         "collectorName": _s(claims.get("name")) or _s(claims.get("email")),
         "status": "requested",
         "createdAt": now,
-        "message": _s(body.get("message"))[:500],
+        "message": message,
+        "quoteAmount": amount,
+        "currency": waste.get("currency", "MYR"),
         "wasteType": waste.get("wasteType", ""),
         "category": waste.get("category", ""),
         "weight": waste.get("weight", ""),
         "area": waste.get("area", ""),
     }
+    waste_max = _dec_price(waste.get("maxPrice"))
+    if waste_max is not None:
+        cr["maxPrice"] = waste_max
     if creq_table:
         creq_table.put_item(Item=cr)
-    # Mark the waste item as having a pending request (keeps it visible).
-    if table:
-        table.update_item(
-            Key={"requestId": waste_id},
-            UpdateExpression="SET #s = :s",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":s": "requested"},
-        )
+    # The waste item is intentionally left 'open' (no status flip) so it stays
+    # listable and can accept further quotes — the single-quote flip is removed.
     notify(waste.get("ownerId"), "request",
            "New collection request",
            cr["collectorName"] + " wants to collect your " + (waste.get("wasteType") or "item") + ".",
@@ -840,30 +979,22 @@ def approve_request(claims, body):
     if cr.get("status") != "requested":
         return json_response({"error": "This request can no longer be approved"}, status=409)
 
+    # Accepting a quote signals intent only — it unlocks NOTHING and does not
+    # auto-close other quotes (the owner may still back out before confirming).
+    # The waste item is NOT flipped here; commitment happens in confirm_deal.
     creq_table.update_item(
         Key={"collectRequestId": cr_id},
         UpdateExpression="SET #s = :s",
         ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":s": "approved"},
+        ExpressionAttributeValues={":s": "accepted"},
     )
-    if table:
-        table.update_item(
-            Key={"requestId": cr["wasteId"]},
-            UpdateExpression="SET #s = :s, collectorId = :c, collectorName = :cn",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
-                ":s": "collecting",
-                ":c": cr["collectorId"],
-                ":cn": cr.get("collectorName", ""),
-            },
-        )
-    notify(cr["collectorId"], "approved",
-           "Request approved",
-           "You can now collect " + (cr.get("wasteType") or "the item") +
-           ". Address and contact are unlocked.",
+    notify(cr["collectorId"], "request",
+           "Quote accepted",
+           "Your quote was accepted — awaiting the owner's confirmation.",
            {"collectRequestId": cr_id, "wasteId": cr["wasteId"]})
-    cr["status"] = "approved"
-    return _creq_view(cr, _get_waste(cr["wasteId"]))
+    cr["status"] = "accepted"
+    # No waste object passed: nothing unlocks at 'accepted'.
+    return _creq_view(cr)
 
 
 def reject_request(claims, body):
@@ -880,20 +1011,15 @@ def reject_request(claims, body):
     if cr.get("status") != "requested":
         return json_response({"error": "This request can no longer be rejected"}, status=409)
 
+    # Rejecting one quote touches ONLY this collect-request row. Under multi-quote
+    # the waste item stays 'open' (quoting never flipped it), so a listing that may
+    # hold other live quotes must not be disturbed — no waste-item write here.
     creq_table.update_item(
         Key={"collectRequestId": cr_id},
         UpdateExpression="SET #s = :s",
         ExpressionAttributeNames={"#s": "status"},
         ExpressionAttributeValues={":s": "rejected"},
     )
-    # If no other active request, reopen the waste item.
-    if table:
-        table.update_item(
-            Key={"requestId": cr["wasteId"]},
-            UpdateExpression="SET #s = :s",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":s": "open"},
-        )
     notify(cr["collectorId"], "rejected",
            "Request declined",
            "Your request to collect " + (cr.get("wasteType") or "the item") + " was declined.",
@@ -911,11 +1037,12 @@ def mark_done(claims, body):
     cr = _get_creq(cr_id)
     if not cr:
         return json_response({"error": "Request not found"}, status=404)
-    # Either party in the approved request can mark it done.
+    # Either party in the confirmed deal can mark it done. The collect-request is
+    # 'confirmed' right up to completion ('collecting' lives on the waste item).
     if claims["sub"] not in (cr.get("ownerId"), cr.get("collectorId")):
         return json_response({"error": "Not authorized"}, status=403)
-    if cr.get("status") != "approved":
-        return json_response({"error": "Request is not approved yet"}, status=400)
+    if cr.get("status") not in ("confirmed",):
+        return json_response({"error": "Request is not confirmed yet"}, status=400)
 
     creq_table.update_item(
         Key={"collectRequestId": cr_id},
@@ -924,6 +1051,8 @@ def mark_done(claims, body):
         ExpressionAttributeValues={":s": "collected", ":t": int(time.time())},
     )
     if table:
+        # NIT#3: this is an UNCONDITIONAL set of the waste item to 'collected'
+        # regardless of its prior status.
         table.update_item(
             Key={"requestId": cr["wasteId"]},
             UpdateExpression="SET #s = :s",
@@ -936,6 +1065,568 @@ def mark_done(claims, body):
                {"collectRequestId": cr_id, "wasteId": cr["wasteId"]})
     cr["status"] = "collected"
     return _creq_view(cr)
+
+
+def confirm_deal(claims, body):
+    """Owner's deliberate commit on an accepted quote. First unlocking state:
+    sets the collect-request to 'confirmed', the waste item to 'collecting', and
+    auto-closes the other live quotes (best-effort)."""
+    cr_id = _s(body.get("collectRequestId"))
+    if not cr_id:
+        return json_response({"error": "Missing request id"}, status=400)
+    if not creq_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    cr = _get_creq(cr_id)
+    if not cr:
+        return json_response({"error": "Request not found"}, status=404)
+    if cr.get("ownerId") != claims["sub"]:
+        return json_response({"error": "Not authorized"}, status=403)
+    if cr.get("status") != "accepted":
+        return json_response({"error": "This request can no longer be confirmed"}, status=409)
+
+    # MEDIUM-1: one confirmed deal per item. Re-load the waste item and refuse if
+    # it is already 'collecting' for a DIFFERENT collector. ('collecting' is a
+    # waste-item status only — never a collect-request status.)
+    waste = _get_waste(cr["wasteId"])
+    if (waste and waste.get("status") == "collecting"
+            and waste.get("collectorId")
+            and waste.get("collectorId") != cr.get("collectorId")):
+        return json_response({"error": "This item already has a confirmed collector"}, status=409)
+
+    # WRITE ORDER (1): commit the collect-request first.
+    creq_table.update_item(
+        Key={"collectRequestId": cr_id},
+        UpdateExpression="SET #s = :s, confirmedAt = :t, paymentStatus = :p",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":s": "confirmed",
+            ":t": int(time.time()),
+            # Phase 2: Stripe PaymentIntent authorization goes here.
+            ":p": "not_required",
+        },
+    )
+    cr["status"] = "confirmed"
+    cr["paymentStatus"] = "not_required"
+
+    # WRITE ORDER (2): flip the waste item to 'collecting' (waste-item-only
+    # status) BEFORE building the unlocked view. If this write fails, return 500
+    # WITHOUT unlocking contact.
+    if table:
+        try:
+            table.update_item(
+                Key={"requestId": cr["wasteId"]},
+                UpdateExpression="SET #s = :s, collectorId = :c, collectorName = :cn",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":s": "collecting",  # waste-item status only
+                    ":c": cr["collectorId"],
+                    ":cn": cr.get("collectorName", ""),
+                },
+            )
+        except Exception as e:
+            logger.error("confirm_deal waste write failed: %s", str(e))
+            return json_response({"error": "Could not confirm the deal"}, status=500)
+
+    # WRITE ORDER (3): best-effort auto-close of the other live quotes. This MUST
+    # NOT fail the confirm — any error is logged and swallowed.
+    try:
+        last_key = None
+        while True:
+            q = {
+                "IndexName": "wasteIndex",
+                "KeyConditionExpression": Key("wasteId").eq(cr["wasteId"]),
+            }
+            if last_key:
+                q["ExclusiveStartKey"] = last_key
+            resp = creq_table.query(**q)
+            for row in resp.get("Items", []):
+                if row.get("collectRequestId") == cr_id:
+                    continue
+                if row.get("status") in ("requested", "accepted"):
+                    try:
+                        creq_table.update_item(
+                            Key={"collectRequestId": row["collectRequestId"]},
+                            UpdateExpression="SET #s = :s",
+                            ExpressionAttributeNames={"#s": "status"},
+                            ExpressionAttributeValues={":s": "closed"},
+                        )
+                        notify(row.get("collectorId"), "rejected",
+                               "Quote closed",
+                               "Another collector was selected for " +
+                               (row.get("wasteType") or "the item") + ".",
+                               {"collectRequestId": row["collectRequestId"],
+                                "wasteId": cr["wasteId"]})
+                    except Exception as e:
+                        logger.error("auto-close row error: %s", str(e))
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+    except Exception as e:
+        logger.error("confirm_deal auto-close error: %s", str(e))
+
+    notify(cr["collectorId"], "approved",
+           "Deal confirmed",
+           "Deal confirmed — address and contact unlocked, chat is open.",
+           {"collectRequestId": cr_id, "wasteId": cr["wasteId"]})
+    return _creq_view(cr, _get_waste(cr["wasteId"]))
+
+
+def cancel_request(claims, body):
+    """Soft back-out usable by either party — NEVER deletes the row. Pre-confirm
+    cancels leave the waste item untouched; a post-confirm cancel reverts the
+    waste item to 'open' only when no OTHER confirmed deal remains for it."""
+    cr_id = _s(body.get("collectRequestId"))
+    if not cr_id:
+        return json_response({"error": "Missing request id"}, status=400)
+    if not creq_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    cr = _get_creq(cr_id)
+    if not cr:
+        return json_response({"error": "Request not found"}, status=404)
+    if not _is_member(cr, claims["sub"]):
+        return json_response({"error": "Not authorized"}, status=403)
+    status = cr.get("status")
+    if status not in ("requested", "accepted", "confirmed"):
+        # collected/rejected/closed/disputed/cancelled cannot be cancelled.
+        return json_response({"error": "This request can no longer be cancelled"}, status=409)
+
+    was_confirmed = status == "confirmed"
+    creq_table.update_item(
+        Key={"collectRequestId": cr_id},
+        UpdateExpression="SET #s = :s, cancelledAt = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":s": "cancelled", ":t": int(time.time())},
+    )
+    # Phase 2: trigger Stripe refund/void here (paymentStatus left as-is).
+
+    if was_confirmed and table:
+        # MEDIUM-2: revert the waste item to 'open' ONLY IF no OTHER confirmed deal
+        # exists. Paginate the full wasteIndex result set, excluding the row being
+        # cancelled. Auto-closed losing quotes are NOT restored on cancel; the
+        # owner re-lists and collectors re-quote.
+        other_confirmed = False
+        try:
+            last_key = None
+            while True:
+                q = {
+                    "IndexName": "wasteIndex",
+                    "KeyConditionExpression": Key("wasteId").eq(cr["wasteId"]),
+                }
+                if last_key:
+                    q["ExclusiveStartKey"] = last_key
+                resp = creq_table.query(**q)
+                for row in resp.get("Items", []):
+                    if row.get("collectRequestId") == cr_id:
+                        continue
+                    if row.get("status") == "confirmed":
+                        other_confirmed = True
+                        break
+                last_key = resp.get("LastEvaluatedKey")
+                if other_confirmed or not last_key:
+                    break
+        except Exception as e:
+            logger.error("cancel_request confirmed-scan error: %s", str(e))
+            # Fail safe: if we cannot prove the item is free, do not reopen it.
+            other_confirmed = True
+        if not other_confirmed:
+            try:
+                table.update_item(
+                    Key={"requestId": cr["wasteId"]},
+                    UpdateExpression="SET #s = :s",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={":s": "open"},
+                )
+            except Exception as e:
+                logger.error("cancel_request reopen error: %s", str(e))
+
+    for uid in (cr.get("ownerId"), cr.get("collectorId")):
+        notify(uid, "rejected", "Collection cancelled",
+               (cr.get("wasteType") or "The collection") + " was cancelled.",
+               {"collectRequestId": cr_id, "wasteId": cr["wasteId"]})
+    cr["status"] = "cancelled"
+    return _creq_view(cr)
+
+
+def raise_dispute(claims, body):
+    """Records a dispute on a committed job (confirmed/collected) and notifies the
+    other party. Phase 1 only records it — no refund, no delete."""
+    cr_id = _s(body.get("collectRequestId"))
+    if not cr_id:
+        return json_response({"error": "Missing request id"}, status=400)
+    if not creq_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    cr = _get_creq(cr_id)
+    if not cr:
+        return json_response({"error": "Request not found"}, status=404)
+    if not _is_member(cr, claims["sub"]):
+        return json_response({"error": "Not authorized"}, status=403)
+    # 'disputed' excluded so a dispute can't be re-raised.
+    if cr.get("status") not in ("confirmed", "collected"):
+        return json_response({"error": "This request cannot be disputed"}, status=409)
+
+    sub = claims["sub"]
+    reason = _s(body.get("reason"))[:1000]
+    creq_table.update_item(
+        Key={"collectRequestId": cr_id},
+        UpdateExpression="SET #s = :s, disputeReason = :r, disputedAt = :t, disputedBy = :b",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":s": "disputed",
+            ":r": reason,
+            ":t": int(time.time()),
+            ":b": sub,
+        },
+    )
+    # Phase 2: refund/arbitration hooks attach here.
+    other = cr.get("collectorId") if sub == cr.get("ownerId") else cr.get("ownerId")
+    notify(other, "rejected", "Dispute raised",
+           "A dispute was raised on " + (cr.get("wasteType") or "the collection") + ".",
+           {"collectRequestId": cr_id, "wasteId": cr["wasteId"]})
+    cr["status"] = "disputed"
+    cr["disputeReason"] = reason
+    cr["disputedBy"] = sub
+    return _creq_view(cr, _get_waste(cr["wasteId"]))
+
+
+# ------------------- Collector business accounts (Part C) -------------------
+# A collector record lives in collectors_table keyed by userId. Lifecycle:
+#   none -> draft (apply) -> pending (submit) -> approved | rejected (admin)
+#   approved -> suspended (admin). Verification documents are uploaded straight
+# to S3 via presigned PUT; only the object key is stored on the record.
+
+_COLLECTOR_REQUIRED_FIELDS = (
+    "businessName", "registrationNumber", "wasteCarrierLicense",
+    "contactPhone", "contactEmail",
+)
+
+
+def _collector_view(c):
+    """Shape a collector record for its owner. Returns {'status':'none'} shape
+    when there is no record."""
+    if not c:
+        return {"status": "none"}
+    return {
+        "status": c.get("status", "none"),
+        "businessName": c.get("businessName", ""),
+        "registrationNumber": c.get("registrationNumber", ""),
+        "wasteCarrierLicense": c.get("wasteCarrierLicense", ""),
+        "serviceAreas": c.get("serviceAreas", []) or [],
+        "wasteCategories": c.get("wasteCategories", []) or [],
+        "contactPhone": c.get("contactPhone", ""),
+        "contactEmail": c.get("contactEmail", ""),
+        "docKeys": c.get("docKeys", {}) or {},
+        "rejectionReason": c.get("rejectionReason", ""),
+        "createdAt": c.get("createdAt"),
+        "updatedAt": c.get("updatedAt"),
+        "verifiedAt": c.get("verifiedAt"),
+    }
+
+
+def collector_apply(claims, body):
+    """Upsert a 'draft' record (idempotent). Re-applying keeps prior data and
+    only updates the supplied fields — it never regresses an approved/pending
+    account back to draft."""
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    user_id = claims["sub"]
+    now = int(time.time())
+    existing = _get_collector(user_id) or {}
+    rec = dict(existing)
+    rec["userId"] = user_id
+    # Keep an existing lifecycle status; only a brand-new record starts 'draft'.
+    rec["status"] = existing.get("status") or "draft"
+    rec.setdefault("createdAt", now)
+    rec.setdefault("docKeys", existing.get("docKeys", {}) or {})
+    # Apply the editable profile fields when present (idempotent upsert).
+    rec["businessName"] = _s(body.get("businessName")) or existing.get("businessName", "")
+    rec["registrationNumber"] = _s(body.get("registrationNumber")) or existing.get("registrationNumber", "")
+    rec["wasteCarrierLicense"] = _s(body.get("wasteCarrierLicense")) or existing.get("wasteCarrierLicense", "")
+    rec["contactPhone"] = _s(body.get("contactPhone")) or existing.get("contactPhone", "")
+    rec["contactEmail"] = _s(body.get("contactEmail")) or existing.get("contactEmail", "")
+    if isinstance(body.get("serviceAreas"), list):
+        rec["serviceAreas"] = [_s(x) for x in body.get("serviceAreas") if _s(x)]
+    else:
+        rec["serviceAreas"] = existing.get("serviceAreas", []) or []
+    if isinstance(body.get("wasteCategories"), list):
+        rec["wasteCategories"] = [_s(x) for x in body.get("wasteCategories") if _s(x)]
+    else:
+        rec["wasteCategories"] = existing.get("wasteCategories", []) or []
+    rec["updatedAt"] = now
+    collectors_table.put_item(Item=rec)
+    return _collector_view(rec)
+
+
+def collector_submit(claims, body):
+    """Move a 'draft' record to 'pending' after validating required fields."""
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    user_id = claims["sub"]
+    c = _get_collector(user_id)
+    if not c:
+        return json_response({"error": "Apply before submitting for verification"}, status=404)
+    if c.get("status") in ("approved", "pending"):
+        return json_response({"error": "Your application is already submitted"}, status=409)
+    # Validate scalar required fields in order, naming the first missing one.
+    for field in _COLLECTOR_REQUIRED_FIELDS:
+        if not _s(c.get(field)):
+            return json_response({"error": field + " is required"}, status=400)
+    # serviceAreas / wasteCategories must each be a non-empty list.
+    if not (isinstance(c.get("serviceAreas"), list) and c.get("serviceAreas")):
+        return json_response({"error": "serviceAreas is required"}, status=400)
+    if not (isinstance(c.get("wasteCategories"), list) and c.get("wasteCategories")):
+        return json_response({"error": "wasteCategories is required"}, status=400)
+
+    now = int(time.time())
+    collectors_table.update_item(
+        Key={"userId": user_id},
+        UpdateExpression="SET #s = :s, updatedAt = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":s": "pending", ":t": now},
+    )
+    c["status"] = "pending"
+    c["updatedAt"] = now
+    notify(user_id, "request", "Verification submitted",
+           "Your collector application is now pending review.",
+           {"collector": True})
+    return _collector_view(c)
+
+
+def collector_me(claims):
+    """Return the caller's collector record (or {'status':'none'})."""
+    return _collector_view(_get_collector(claims["sub"]))
+
+
+# NIT#5: only these content types may be presigned for a verification upload.
+UPLOAD_CONTENT_TYPES = {"image/png", "image/jpeg", "application/pdf"}
+
+
+def collector_upload_url(claims, body):
+    """Presign a PUT so the browser can upload a verification document straight
+    to S3. The signed ContentType MUST equal the Content-Type the browser sends
+    on the PUT, so we echo the validated contentType back to the caller."""
+    if not collectors_table or not COLLECTOR_DOCS_BUCKET:
+        return json_response({"error": "Service unavailable"}, status=503)
+    user_id = claims["sub"]
+    doc_type = _s(body.get("docType"))
+    content_type = _s(body.get("contentType"))
+    if doc_type not in DOC_TYPES:
+        return json_response({"error": "Unsupported document type"}, status=400)
+    # NIT#5: reject anything outside the allow-list.
+    if content_type not in UPLOAD_CONTENT_TYPES:
+        return json_response({"error": "Unsupported content type"}, status=400)
+    key = "collectors/{}/{}".format(user_id, doc_type)
+    try:
+        url = s3.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": COLLECTOR_DOCS_BUCKET, "Key": key, "ContentType": content_type},
+            ExpiresIn=300,
+        )
+    except Exception as e:
+        logger.error("presign upload error: %s", str(e))
+        return json_response({"error": "Could not create upload URL"}, status=500)
+    # Record the key on the collector record so the admin queue can find it.
+    try:
+        collectors_table.update_item(
+            Key={"userId": user_id},
+            UpdateExpression="SET docKeys.#d = :k, updatedAt = :t",
+            ExpressionAttributeNames={"#d": doc_type},
+            ExpressionAttributeValues={":k": key, ":t": int(time.time())},
+        )
+    except Exception as e:
+        # The record may not have a docKeys map yet — set the whole map then.
+        logger.warning("docKeys update fallback: %s", str(e))
+        try:
+            collectors_table.update_item(
+                Key={"userId": user_id},
+                UpdateExpression="SET docKeys = :m, updatedAt = :t",
+                ExpressionAttributeValues={":m": {doc_type: key}, ":t": int(time.time())},
+            )
+        except Exception as e2:
+            logger.error("docKeys set error: %s", str(e2))
+    return {"url": url, "key": key}
+
+
+# ------------------- Admin verification queue (Part D) ----------------------
+
+_COLLECTOR_STATUSES = {"pending", "approved", "rejected", "suspended"}
+
+
+def _is_admin(claims):
+    # cognito:groups is TOKEN-SCOPED: a newly-added admin must re-login (or wait
+    # for their ID token to refresh) before this returns True.
+    return "admins" in (claims.get("cognito:groups") or [])
+
+
+def admin_list_collectors(claims, status):
+    """List collector records in a given lifecycle status, newest-first, with a
+    short-lived presigned GET URL per uploaded document."""
+    if not _is_admin(claims):
+        return json_response({"error": "Not authorized"}, status=403)
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    status = _s(status) or "pending"
+    if status not in _COLLECTOR_STATUSES:
+        return json_response({"error": "Invalid status filter"}, status=400)
+    items = []
+    try:
+        resp = collectors_table.query(
+            IndexName="statusIndex",
+            KeyConditionExpression=Key("status").eq(status),
+            ScanIndexForward=False,  # newest first
+            Limit=100,
+        )
+        items = resp.get("Items", [])
+    except Exception as e:
+        logger.error("admin_list_collectors query error: %s", str(e))
+    out = []
+    for c in items:
+        v = _collector_view(c)
+        v["userId"] = c.get("userId")
+        # Attach a short-lived presigned GET per document, tolerating a missing
+        # object (presign never checks existence, so this only fails on a client
+        # error — logged, not fatal).
+        doc_urls = {}
+        for dt, key in (c.get("docKeys") or {}).items():
+            if not key:
+                continue
+            try:
+                doc_urls[dt] = s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": COLLECTOR_DOCS_BUCKET, "Key": key},
+                    ExpiresIn=300,
+                )
+            except Exception as e:
+                logger.warning("presign get error for %s: %s", key, str(e))
+        v["docUrls"] = doc_urls
+        out.append(v)
+    return {"collectors": out}
+
+
+def admin_approve_collector(claims, collector_id):
+    if not _is_admin(claims):
+        return json_response({"error": "Not authorized"}, status=403)
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    c = _get_collector(collector_id)
+    if not c:
+        return json_response({"error": "Collector not found"}, status=404)
+    if c.get("status") != "pending":
+        return json_response({"error": "Only a pending application can be approved"}, status=409)
+    now = int(time.time())
+    collectors_table.update_item(
+        Key={"userId": collector_id},
+        UpdateExpression="SET #s = :s, verifiedAt = :v, verifiedBy = :b, updatedAt = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":s": "approved", ":v": now, ":b": claims["sub"], ":t": now},
+    )
+    notify(collector_id, "approved", "Collector verified",
+           "Your collector business account has been approved. You can now quote on paid pickups.",
+           {"collector": True})
+    c["status"] = "approved"
+    c["verifiedAt"] = now
+    c["updatedAt"] = now
+    return _collector_view(c)
+
+
+def admin_reject_collector(claims, collector_id, body):
+    if not _is_admin(claims):
+        return json_response({"error": "Not authorized"}, status=403)
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    c = _get_collector(collector_id)
+    if not c:
+        return json_response({"error": "Collector not found"}, status=404)
+    if c.get("status") != "pending":
+        return json_response({"error": "Only a pending application can be rejected"}, status=409)
+    reason = _s((body or {}).get("reason"))[:1000]
+    now = int(time.time())
+    collectors_table.update_item(
+        Key={"userId": collector_id},
+        UpdateExpression="SET #s = :s, rejectionReason = :r, updatedAt = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":s": "rejected", ":r": reason, ":t": now},
+    )
+    notify(collector_id, "rejected", "Verification declined",
+           ("Your collector application was declined. " + reason).strip(),
+           {"collector": True})
+    c["status"] = "rejected"
+    c["rejectionReason"] = reason
+    c["updatedAt"] = now
+    return _collector_view(c)
+
+
+def admin_suspend_collector(claims, collector_id):
+    if not _is_admin(claims):
+        return json_response({"error": "Not authorized"}, status=403)
+    if not collectors_table:
+        return json_response({"error": "Service unavailable"}, status=503)
+    c = _get_collector(collector_id)
+    if not c:
+        return json_response({"error": "Collector not found"}, status=404)
+    if c.get("status") != "approved":
+        return json_response({"error": "Only an approved collector can be suspended"}, status=409)
+    now = int(time.time())
+    collectors_table.update_item(
+        Key={"userId": collector_id},
+        UpdateExpression="SET #s = :s, updatedAt = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":s": "suspended", ":t": now},
+    )
+    notify(collector_id, "rejected", "Collector suspended",
+           "Your collector business account has been suspended.",
+           {"collector": True})
+    c["status"] = "suspended"
+    c["updatedAt"] = now
+    return _collector_view(c)
+
+
+# ------------------- Prefix dispatchers (/collector/ and /admin/) -----------
+# These MUST run IN FRONT of the handler()'s endswith chain: a route such as
+# /admin/collectors/{id}/approve would otherwise be captured by
+# route.endswith('approve') and mis-routed to approve_request.
+
+def dispatch_collector(claims, route, body):
+    if route.endswith("/collector/apply"):
+        return collector_apply(claims, body)
+    if route.endswith("/collector/submit"):
+        return collector_submit(claims, body)
+    if route.endswith("/collector/upload-url"):
+        return collector_upload_url(claims, body)
+    return json_response({"error": "Unsupported route"}, status=400)
+
+
+def dispatch_collector_get(claims, route):
+    if route.endswith("/collector/me"):
+        return collector_me(claims)
+    return json_response({"error": "Unsupported route"}, status=400)
+
+
+def dispatch_admin(claims, route, body):
+    """POST /admin/collectors/{id}/{action}. Parse the id + action out of the
+    path, validate the action, check _is_admin FIRST, then dispatch."""
+    parts = route.split("/")  # ['', 'admin', 'collectors', '<id>', '<action>']
+    if len(parts) >= 5 and parts[-4] == "admin" and parts[-3] == "collectors":
+        collector_id = parts[-2]
+        action = parts[-1]
+        if action not in ("approve", "reject", "suspend"):
+            return json_response({"error": "Unsupported admin action"}, status=400)
+        if not _is_admin(claims):
+            return json_response({"error": "Not authorized"}, status=403)
+        if action == "approve":
+            return admin_approve_collector(claims, collector_id)
+        if action == "reject":
+            return admin_reject_collector(claims, collector_id, body)
+        if action == "suspend":
+            return admin_suspend_collector(claims, collector_id)
+    return json_response({"error": "Unsupported route"}, status=400)
+
+
+def dispatch_admin_get(claims, route):
+    if route.endswith("/admin/collectors"):
+        status = request.args.get("status", "pending")
+        return admin_list_collectors(claims, status)
+    return json_response({"error": "Unsupported route"}, status=400)
 
 
 def list_requests(claims):
@@ -966,13 +1657,13 @@ def list_requests(claims):
     # sees outgoing with unlock when approved.
     incoming_views = []
     for cr in incoming:
-        v = _creq_view(cr, _get_waste(cr["wasteId"]) if cr.get("status") == "approved" else None)
+        v = _creq_view(cr, _get_waste(cr["wasteId"]) if cr.get("status") in UNLOCK_STATUSES else None)
         v["role"] = "owner"
         v["collectorName"] = cr.get("collectorName", "")
         incoming_views.append(v)
     outgoing_views = []
     for cr in outgoing:
-        v = _creq_view(cr, _get_waste(cr["wasteId"]) if cr.get("status") == "approved" else None)
+        v = _creq_view(cr, _get_waste(cr["wasteId"]) if cr.get("status") in UNLOCK_STATUSES else None)
         v["role"] = "collector"
         outgoing_views.append(v)
     return {"incoming": incoming_views, "outgoing": outgoing_views}
@@ -985,8 +1676,9 @@ def _is_member(cr, user_id):
 
 
 def _chat_enabled(cr):
-    # Chat opens once a request is approved, stays available through completion.
-    return cr.get("status") in ("approved", "collected")
+    # Chat opens once a deal is confirmed and stays available through completion/
+    # dispute. Single source of truth is CHAT_STATUSES (== UNLOCK_STATUSES).
+    return cr.get("status") in CHAT_STATUSES
 
 
 def list_conversations(claims):
@@ -1116,6 +1808,12 @@ def handler(path):
 
         if request.method == "POST":
             body = request.get_json(force=True, silent=True) or {}
+            # Prefix dispatch MUST precede the endswith chain so that
+            # /admin/collectors/{id}/approve is not captured by endswith('approve').
+            if route.startswith("/admin/"):
+                return _unwrap(dispatch_admin(claims, route, body))
+            if route.startswith("/collector/"):
+                return _unwrap(dispatch_collector(claims, route, body))
             if route.endswith("report"):
                 return _unwrap(create_report(claims, body))
             if route.endswith("request"):
@@ -1124,6 +1822,12 @@ def handler(path):
                 return _unwrap(approve_request(claims, body))
             if route.endswith("reject"):
                 return _unwrap(reject_request(claims, body))
+            if route.endswith("confirm"):
+                return _unwrap(confirm_deal(claims, body))
+            if route.endswith("cancel"):
+                return _unwrap(cancel_request(claims, body))
+            if route.endswith("dispute"):
+                return _unwrap(raise_dispute(claims, body))
             if route.endswith("done"):
                 return _unwrap(mark_done(claims, body))
             if route.endswith("message"):
@@ -1137,6 +1841,11 @@ def handler(path):
             return json_response({"error": "Unsupported route"}, status=400)
 
         # GET
+        # Prefix dispatch MUST precede the endswith chain (same collision reason).
+        if route.startswith("/collector/"):
+            return _unwrap(dispatch_collector_get(claims, route))
+        if route.startswith("/admin/"):
+            return _unwrap(dispatch_admin_get(claims, route))
         if route.endswith("mine"):
             return _unwrap(list_mine(claims))
         if route.endswith("requests"):

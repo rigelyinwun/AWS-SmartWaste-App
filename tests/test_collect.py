@@ -38,6 +38,25 @@ def test_public_view_masks_for_non_owner():
     assert v["area"] == "Cyberjaya"
 
 
+def test_public_view_exposes_price_fields_to_non_owner():
+    # Pricing fields are not sensitive: priceType/currency (and maxPrice when
+    # set) are shown to a non-owner while the address stays masked.
+    item = {
+        "requestId": "r1", "ownerId": "u1", "status": "open",
+        "wasteType": "Bottles", "fullAddress": "123 Secret St",
+        "phone": "+60123", "area": "Cyberjaya",
+        "priceType": "user_pays", "currency": "MYR", "maxPrice": "25.00",
+    }
+    v = app.public_view(item, owner=False)
+    assert v["priceType"] == "user_pays"
+    assert v["currency"] == "MYR"
+    assert v["maxPrice"] == "25.00"
+    # Masking preserved.
+    assert v.get("addressMasked") is True
+    assert "fullAddress" not in v
+    assert "phone" not in v
+
+
 def test_public_view_reveals_for_owner():
     item = {
         "requestId": "r1", "ownerId": "u1", "status": "open",
@@ -59,14 +78,138 @@ def test_creq_view_locked_when_requested():
     assert not v.get("unlocked")
 
 
-def test_creq_view_unlocks_when_approved():
+def test_creq_view_unlocks_when_confirmed():
+    # Unlock point moved from 'approved' to 'confirmed' (first UNLOCK_STATUSES
+    # state) by the Phase 1 disintermediation state machine.
     cr = {"collectRequestId": "c1", "wasteId": "w1", "ownerId": "o",
-          "collectorId": "k", "status": "approved"}
+          "collectorId": "k", "status": "confirmed"}
     waste = {"fullAddress": "123 St", "phone": "+60", "pickupTime": "9am", "notes": "lobby"}
     v = app._creq_view(cr, waste)
     assert v["unlocked"] is True
     assert v["fullAddress"] == "123 St"
     assert v["ownerPhone"] == "+60"
+
+
+# --- _dec_price: parse money to non-negative 2dp Decimal, else None ---
+def test_dec_price_parses_and_rounds():
+    from decimal import Decimal
+    assert app._dec_price("5") == Decimal("5.00")
+    assert app._dec_price("5") == 5
+    # Rounds to 2 decimal places (half-even quantize).
+    assert app._dec_price("1.555") == Decimal("1.56")
+    assert app._dec_price("10.004") == Decimal("10.00")
+
+
+def test_dec_price_blank_and_junk_return_none():
+    assert app._dec_price("") is None
+    assert app._dec_price(None) is None
+    assert app._dec_price("abc") is None
+    assert app._dec_price("1.2.3") is None
+
+
+def test_dec_price_negative_returns_none():
+    assert app._dec_price("-1") is None
+    assert app._dec_price("-0.01") is None
+
+
+# --- _validate_quote: amount vs owner maxPrice ---
+def test_validate_quote_requires_positive_amount():
+    from decimal import Decimal
+    ok, err = app._validate_quote(None, None)
+    assert ok is False and err == "A quote amount greater than 0 is required"
+    ok, err = app._validate_quote(Decimal("0"), None)
+    assert ok is False and err == "A quote amount greater than 0 is required"
+    ok, err = app._validate_quote(Decimal("-5"), None)
+    assert ok is False and err == "A quote amount greater than 0 is required"
+
+
+def test_validate_quote_rejects_above_max_price():
+    from decimal import Decimal
+    ok, err = app._validate_quote(Decimal("50.00"), Decimal("40.00"))
+    assert ok is False
+    assert err == "Quote exceeds the owner's maximum price"
+
+
+def test_validate_quote_accepts_within_max_and_no_max():
+    from decimal import Decimal
+    ok, err = app._validate_quote(Decimal("40.00"), Decimal("40.00"))
+    assert ok is True and err is None
+    ok, err = app._validate_quote(Decimal("10.00"), None)
+    assert ok is True and err is None
+
+
+# --- _creq_view: price fields always present (NIT#6) ---
+def test_creq_view_price_fields_present_pre_confirm():
+    # For pre-confirm statuses, contact fields are ABSENT but price fields are
+    # ALWAYS present (never gated by unlock) — NIT#6.
+    waste = {"fullAddress": "123 St", "phone": "+60"}
+    for status in ("requested", "accepted"):
+        cr = {"collectRequestId": "c1", "wasteId": "w1", "ownerId": "o",
+              "collectorId": "k", "status": status,
+              "quoteAmount": None, "currency": "MYR",
+              "maxPrice": None, "paymentStatus": "unpaid"}
+        v = app._creq_view(cr, waste)
+        # Contact absent pre-confirm.
+        assert "fullAddress" not in v
+        assert "ownerPhone" not in v
+        assert not v.get("unlocked")
+        # Price fields always present.
+        assert "quoteAmount" in v
+        assert "currency" in v
+        assert "maxPrice" in v
+        assert "paymentStatus" in v
+
+
+def test_creq_view_unlocks_for_each_unlock_status_with_waste():
+    waste = {"fullAddress": "123 St", "phone": "+60", "pickupTime": "9am", "notes": "n"}
+    for status in app.UNLOCK_STATUSES:
+        cr = {"collectRequestId": "c1", "wasteId": "w1", "ownerId": "o",
+              "collectorId": "k", "status": status}
+        v = app._creq_view(cr, waste)
+        assert v["unlocked"] is True
+        assert v["fullAddress"] == "123 St"
+        assert v["ownerPhone"] == "+60"
+        # Price fields still present alongside the unlock.
+        assert "quoteAmount" in v and "maxPrice" in v
+
+
+def test_creq_view_contact_absent_when_waste_none():
+    # Documents the list_requests call-site contract: even in an UNLOCK status,
+    # contact fields stay absent when no waste object is supplied.
+    for status in app.UNLOCK_STATUSES:
+        cr = {"collectRequestId": "c1", "wasteId": "w1", "ownerId": "o",
+              "collectorId": "k", "status": status}
+        v = app._creq_view(cr, None)
+        assert "fullAddress" not in v
+        assert "ownerPhone" not in v
+        assert not v.get("unlocked")
+        # Price fields remain present regardless.
+        assert "quoteAmount" in v and "maxPrice" in v
+
+
+# --- _chat_enabled: open only in CHAT_STATUSES ---
+def test_chat_enabled_false_pre_and_post_terminal():
+    for status in ("requested", "accepted", "rejected", "cancelled", "closed"):
+        cr = {"status": status}
+        assert app._chat_enabled(cr) is False
+
+
+def test_chat_enabled_true_in_chat_statuses():
+    for status in app.CHAT_STATUSES:
+        cr = {"status": status}
+        assert app._chat_enabled(cr) is True
+
+
+# --- _is_admin: only when 'admins' in cognito:groups ---
+def test_is_admin_true_only_when_in_admins_group():
+    assert app._is_admin({"cognito:groups": ["admins"]}) is True
+    assert app._is_admin({"cognito:groups": ["users", "admins"]}) is True
+
+
+def test_is_admin_false_for_empty_missing_or_unrelated_group():
+    assert app._is_admin({"cognito:groups": []}) is False
+    assert app._is_admin({}) is False
+    assert app._is_admin({"cognito:groups": ["collectors"]}) is False
 
 
 # --- _json_default (Decimal serialization) ---
@@ -136,3 +279,222 @@ def test_bucket_timeseries_year_granularity_when_span_large():
     labels = [p["label"] for p in ts["points"]]
     assert labels == sorted(labels)
     assert "2020" in labels and "2024" in labels
+
+
+# ===================== Free-giveaway lane (request_collect) =====================
+# These tests drive request_collect with lightweight fakes for the module-level
+# AWS handles so the pure routing/gate logic runs without hitting AWS. The
+# collect-request table captures put_item so we can assert what was persisted.
+
+class _CaptureTable:
+    """Captures put_item and returns no live quotes from the duplicate scan."""
+    def __init__(self):
+        self.put_items = []
+
+    def put_item(self, Item=None, **k):
+        self.put_items.append(Item)
+
+    def query(self, **k):
+        # No existing quotes -> never a duplicate-live-quote conflict.
+        return {"Items": []}
+
+
+def _status_of(resp):
+    """request_collect returns a flask _Response stub (error) or a dict
+    (_creq_view success). Normalize to an HTTP-ish status for assertions."""
+    return getattr(resp, "status", 200)
+
+
+def _setup_request_collect(monkeypatch, waste, approved=False):
+    """Wire request_collect's module globals to fakes. `approved` controls
+    whether the calling user is an approved collector."""
+    cap = _CaptureTable()
+    monkeypatch.setattr(app, "creq_table", cap)
+    # `table` just needs to be truthy for the service-available guard; _get_waste
+    # is patched to return our waste object directly.
+    monkeypatch.setattr(app, "table", object())
+    monkeypatch.setattr(app, "_get_waste", lambda wid: waste)
+    monkeypatch.setattr(app, "_is_approved_collector", lambda uid: approved)
+    monkeypatch.setattr(app, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(app, "_now_micros", lambda: 1)
+    return cap
+
+
+def _open_waste(price_type, owner="owner-1", max_price=None):
+    w = {"requestId": "w1", "ownerId": owner, "status": "open",
+         "wasteType": "Bottles", "priceType": price_type, "currency": "MYR"}
+    if max_price is not None:
+        w["maxPrice"] = max_price
+    return w
+
+
+# (a) free listing lets a NON-approved-collector user pass the gate (no 403).
+def test_request_collect_free_allows_non_collector(monkeypatch):
+    cap = _setup_request_collect(monkeypatch, _open_waste("free"), approved=False)
+    resp = app.request_collect({"sub": "user-2", "name": "Ann"},
+                               {"wasteId": "w1"})
+    # Success path returns a _creq_view dict, not a 403 Response.
+    assert isinstance(resp, dict)
+    assert _status_of(resp) == 200
+    assert len(cap.put_items) == 1
+    # No quote amount recorded for a free collect.
+    assert cap.put_items[0]["quoteAmount"] is None
+
+
+# (b) a free collect with no quoteAmount is accepted (no 400).
+def test_request_collect_free_no_amount_no_400(monkeypatch):
+    _setup_request_collect(monkeypatch, _open_waste("free"), approved=False)
+    # Body omits quoteAmount entirely.
+    resp = app.request_collect({"sub": "user-2"}, {"wasteId": "w1"})
+    assert isinstance(resp, dict)
+    assert _status_of(resp) == 200
+
+
+# (c) paid listing STILL 403s a non-approved collector (regression).
+def test_request_collect_paid_still_403s_non_collector(monkeypatch):
+    _setup_request_collect(monkeypatch, _open_waste("user_pays"), approved=False)
+    resp = app.request_collect({"sub": "user-2"},
+                               {"wasteId": "w1", "quoteAmount": "10.00"})
+    assert _status_of(resp) == 403
+
+
+# (c) paid listing STILL 400s an over-ceiling / invalid quote (regression).
+def test_request_collect_paid_still_400s_over_ceiling(monkeypatch):
+    _setup_request_collect(monkeypatch,
+                           _open_waste("user_pays", max_price="20.00"),
+                           approved=True)
+    # Over the owner's ceiling -> 400.
+    resp = app.request_collect({"sub": "user-2"},
+                               {"wasteId": "w1", "quoteAmount": "50.00"})
+    assert _status_of(resp) == 400
+    # Missing amount on a paid item -> 400 (positive amount required).
+    resp2 = app.request_collect({"sub": "user-2"},
+                                {"wasteId": "w1"})
+    assert _status_of(resp2) == 400
+
+
+# (c) paid listing accepts a valid within-ceiling quote from an approved collector.
+def test_request_collect_paid_accepts_valid_quote(monkeypatch):
+    cap = _setup_request_collect(monkeypatch,
+                                 _open_waste("user_pays", max_price="20.00"),
+                                 approved=True)
+    resp = app.request_collect({"sub": "user-2"},
+                               {"wasteId": "w1", "quoteAmount": "15.00"})
+    assert isinstance(resp, dict)
+    from decimal import Decimal
+    assert cap.put_items[0]["quoteAmount"] == Decimal("15.00")
+
+
+# (d) unknown/bogus priceType falls back to paid (user_pays) so the free lane
+#     cannot be opened by a bad value — a non-collector still gets 403.
+def test_request_collect_bogus_pricetype_is_business_gated(monkeypatch):
+    # NOTE: request_collect itself only treats EXACTLY 'free' as free; any other
+    # value (incl. junk) stays on the business-gated paid path.
+    _setup_request_collect(monkeypatch, _open_waste("totally-bogus"),
+                           approved=False)
+    resp = app.request_collect({"sub": "user-2"},
+                               {"wasteId": "w1", "quoteAmount": "10.00"})
+    assert _status_of(resp) == 403
+
+
+# Guards that MUST still apply to free items.
+def test_request_collect_free_self_collect_still_400(monkeypatch):
+    _setup_request_collect(monkeypatch, _open_waste("free", owner="user-2"),
+                           approved=False)
+    resp = app.request_collect({"sub": "user-2"}, {"wasteId": "w1"})
+    assert _status_of(resp) == 400  # self-collect guard
+
+
+def test_request_collect_free_closed_item_still_409(monkeypatch):
+    waste = _open_waste("free")
+    waste["status"] = "collected"
+    _setup_request_collect(monkeypatch, waste, approved=False)
+    resp = app.request_collect({"sub": "user-2"}, {"wasteId": "w1"})
+    assert _status_of(resp) == 409  # item no longer available
+
+
+def test_request_collect_free_duplicate_live_quote_still_409(monkeypatch):
+    cap = _setup_request_collect(monkeypatch, _open_waste("free"), approved=False)
+
+    # Make the duplicate-scan return a live quote by the same collector.
+    def _query(**k):
+        return {"Items": [{"collectorId": "user-2", "status": "requested"}]}
+    cap.query = _query
+    resp = app.request_collect({"sub": "user-2"}, {"wasteId": "w1"})
+    assert _status_of(resp) == 409  # duplicate live quote
+
+
+# (e) disintermediation invariant for a FREE item: a freshly-created free quote
+#     is 'requested' -> contact/chat MUST stay locked (nothing unlocks before
+#     'confirmed'). The lifecycle is shared, so _creq_view enforces this.
+def test_free_item_quote_locked_until_confirmed(monkeypatch):
+    cap = _setup_request_collect(monkeypatch, _open_waste("free"), approved=False)
+    resp = app.request_collect({"sub": "user-2"}, {"wasteId": "w1"})
+    assert resp["status"] == "requested"
+    assert not resp.get("unlocked")
+    assert "fullAddress" not in resp
+    assert "ownerPhone" not in resp
+    assert app._chat_enabled({"status": "requested"}) is False
+    # The persisted record is a normal collect-request that flows through the
+    # same accept -> confirm machine; it only unlocks at a confirmed status.
+    stored = cap.put_items[0]
+    assert stored["status"] == "requested"
+    waste = _open_waste("free")
+    assert app._creq_view(stored, waste).get("unlocked") is not True
+
+
+# ===================== create_report priceType whitelist =====================
+
+def _setup_create_report(monkeypatch):
+    """Fake the image validator + waste table so create_report runs offline and
+    we can inspect the persisted item."""
+    cap = _CaptureTable()
+    monkeypatch.setattr(app, "table", cap)
+    monkeypatch.setattr(app, "validate_image", lambda *a, **k: True)
+    return cap
+
+
+def _report_body(**over):
+    body = {
+        "contactName": "Jane", "phone": "+60123456789", "fullAddress": "123 St",
+        "wasteType": "Bottles", "category": "plastic", "weight": "2kg",
+        "file_data": "x", "file_mime": "image/png",
+    }
+    body.update(over)
+    return body
+
+
+def test_create_report_free_records_free_and_no_max_price(monkeypatch):
+    cap = _setup_create_report(monkeypatch)
+    app.create_report({"sub": "u1", "name": "Jane", "email": "j@x.com"},
+                      _report_body(priceType="free", maxPrice="20.00"))
+    item = cap.put_items[0]
+    assert item["priceType"] == "free"
+    # A free listing records NO maxPrice even if one is sent.
+    assert "maxPrice" not in item
+
+
+def test_create_report_user_pays_keeps_max_price(monkeypatch):
+    cap = _setup_create_report(monkeypatch)
+    app.create_report({"sub": "u1"},
+                      _report_body(priceType="user_pays", maxPrice="20.00"))
+    item = cap.put_items[0]
+    assert item["priceType"] == "user_pays"
+    from decimal import Decimal
+    assert item["maxPrice"] == Decimal("20.00")
+
+
+def test_create_report_unknown_pricetype_falls_back_to_user_pays(monkeypatch):
+    # A bogus priceType must fail safe toward the paid, business-gated lane so a
+    # bad value can never open the free collect lane.
+    cap = _setup_create_report(monkeypatch)
+    app.create_report({"sub": "u1"}, _report_body(priceType="totally-bogus"))
+    assert cap.put_items[0]["priceType"] == "user_pays"
+
+
+def test_create_report_missing_pricetype_defaults_to_user_pays(monkeypatch):
+    cap = _setup_create_report(monkeypatch)
+    body = _report_body()
+    body.pop("priceType", None)
+    app.create_report({"sub": "u1"}, body)
+    assert cap.put_items[0]["priceType"] == "user_pays"

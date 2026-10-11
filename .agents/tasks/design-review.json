@@ -1,0 +1,55 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "location": "Part B confirm_deal (effects 2-3) and 'Soft status - cancel' post-confirm branch",
+      "problem": "confirm_deal performs three non-transactional writes (collect-request -> confirmed, waste item -> collecting, auto-close losing quotes) with only best-effort error handling, and its guard only checks the collect-request is 'accepted'. If the waste-item write fails after the collect-request is confirmed, contact is unlocked while the item stays 'open' and can accept/confirm another quote. 'One confirmed deal per item' is not enforced.",
+      "fix": "Add a guard at the top of confirm_deal that re-loads the waste item and returns 409 if it is already 'collecting' for a different collectorId. Specify write order (collect-request confirmed, then waste item, then auto-close) and return 500 without surfacing the unlocked view if the waste-item write fails."
+    },
+    {
+      "id": 2,
+      "severity": "MEDIUM",
+      "location": "Part B 'Soft status - cancel', post-confirm cancel branch",
+      "problem": "'Revert waste item to open only if no other confirmed deal exists' is asserted with no query mechanism specified, and the design does not state whether previously auto-closed losing quotes are restored when a confirmed deal is cancelled (item re-opens with zero live quotes).",
+      "fix": "Specify the 'no other confirmed deal' check as a paginated wasteIndex query (no Limit, LastEvaluatedKey) filtering status == 'confirmed'. Add an explicit sentence that auto-closed quotes are NOT restored on cancel (owner re-lists, collectors re-quote) - or the opposite if intended."
+    },
+    {
+      "id": 3,
+      "severity": "NIT",
+      "location": "Part B item 8 (mark_done) and waste-item status mapping",
+      "problem": "mark_done's collect-request guard is clear, but the design never states that the waste-item write is unconditional, leaving ambiguity when the item is 'open' (e.g. after an inconsistent confirm or a prior revert).",
+      "fix": "Add: 'the waste-item write in mark_done is an unconditional set to collected; it does not guard on the item's prior status.'"
+    },
+    {
+      "id": 4,
+      "severity": "NIT",
+      "location": "Part A order step 5 + 'Multiple quotes' + Part E quote overlay",
+      "problem": "Step-5 409 ('This item is no longer available') is the message a collector sees after another collector's deal was confirmed, but Part E only maps 403/400/409 generically; the specific 'someone else was confirmed' path is not called out.",
+      "fix": "State that step-5 409 fires for collecting/collected items and that the quote overlay surfaces the server error string verbatim for this path."
+    },
+    {
+      "id": 5,
+      "severity": "NIT",
+      "location": "Part C upload-url + validation table 'contentType signed as-is'",
+      "problem": "The presigned PUT ContentType is signed as-is with no server-side allow-list, so a client can presign and upload any MIME type into the documents bucket.",
+      "fix": "Validate contentType against a small allow-list (image/png, image/jpeg, application/pdf) in upload-url -> 400 otherwise; reflect it in the validation table."
+    },
+    {
+      "id": 6,
+      "severity": "NIT",
+      "location": "Testability section + View exposure (_creq_view)",
+      "problem": "_creq_view now always exposes quoteAmount/currency/maxPrice/paymentStatus, but the Testability section does not assert these are present in the locked (requested/accepted) view, so a future refactor that mistakenly gates them would go uncaught.",
+      "fix": "Add a test assertion that quoteAmount/currency/maxPrice/paymentStatus are present for requested and accepted while fullAddress/ownerPhone/unlocked remain absent."
+    },
+    {
+      "id": 7,
+      "severity": "NIT",
+      "location": "Part D _is_admin + Part E Admin nav gating",
+      "problem": "Admin gating relies on cognito:groups in the ID token; the design does not note that a user added to the admins group after token issuance will not see the claim until the token refreshes.",
+      "fix": "Add a one-line operational note under Part D: group membership is token-scoped and a newly-added admin must re-login (or wait for token refresh) before the Admin nav/API works."
+    }
+  ],
+  "reviewDoc": "c:\\programming\\kiroaws\\smartwaste-app\\.worktrees\\phase1-marketplace\\.agents\\tasks\\design-review.md"
+}
