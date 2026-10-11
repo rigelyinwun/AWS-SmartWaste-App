@@ -498,3 +498,159 @@ def test_create_report_missing_pricetype_defaults_to_user_pays(monkeypatch):
     body.pop("priceType", None)
     app.create_report({"sub": "u1"}, body)
     assert cap.put_items[0]["priceType"] == "user_pays"
+
+
+# ===================== Admin prefix dispatch (invariant e) =====================
+# These harden the routing collision guard: /admin/collectors/{id}/approve MUST
+# be captured by the prefix dispatcher and reach the admin handler, NOT the
+# endswith('approve') -> approve_request branch. They also pin the admins-group
+# gate ahead of any state change. All run offline (admin_* functions patched).
+
+def _patch_admin_calls(monkeypatch):
+    """Record which admin handler fired, without touching AWS."""
+    calls = []
+    monkeypatch.setattr(app, "admin_approve_collector",
+                        lambda claims, cid: calls.append(("approve", cid)) or {"ok": True})
+    monkeypatch.setattr(app, "admin_reject_collector",
+                        lambda claims, cid, body: calls.append(("reject", cid, body)) or {"ok": True})
+    monkeypatch.setattr(app, "admin_suspend_collector",
+                        lambda claims, cid: calls.append(("suspend", cid)) or {"ok": True})
+    return calls
+
+
+def test_dispatch_admin_routes_approve_to_admin_handler(monkeypatch):
+    # The id contains the literal word 'approve'-adjacent path; the dispatcher
+    # must parse the trailing action and call admin_approve_collector.
+    calls = _patch_admin_calls(monkeypatch)
+    admin_claims = {"sub": "a1", "cognito:groups": ["admins"]}
+    resp = app.dispatch_admin(admin_claims, "/admin/collectors/COL-123/approve", {})
+    assert resp == {"ok": True}
+    assert calls == [("approve", "COL-123")]
+
+
+def test_dispatch_admin_reject_and_suspend(monkeypatch):
+    calls = _patch_admin_calls(monkeypatch)
+    admin_claims = {"sub": "a1", "cognito:groups": ["admins"]}
+    app.dispatch_admin(admin_claims, "/admin/collectors/C9/reject", {"reason": "bad"})
+    app.dispatch_admin(admin_claims, "/admin/collectors/C9/suspend", {})
+    assert calls[0] == ("reject", "C9", {"reason": "bad"})
+    assert calls[1] == ("suspend", "C9")
+
+
+def test_dispatch_admin_requires_admins_group(monkeypatch):
+    # A non-admin must get 403 and NO admin handler may fire (gate before action).
+    calls = _patch_admin_calls(monkeypatch)
+    resp = app.dispatch_admin({"sub": "u1", "cognito:groups": ["collectors"]},
+                              "/admin/collectors/C1/approve", {})
+    assert _status_of(resp) == 403
+    assert calls == []
+
+
+def test_dispatch_admin_unknown_action_is_400_before_group_check(monkeypatch):
+    # An unsupported trailing action is rejected 400 and never reaches a handler.
+    calls = _patch_admin_calls(monkeypatch)
+    resp = app.dispatch_admin({"sub": "a1", "cognito:groups": ["admins"]},
+                              "/admin/collectors/C1/delete", {})
+    assert _status_of(resp) == 400
+    assert calls == []
+
+
+def test_dispatch_admin_malformed_path_is_400(monkeypatch):
+    # Too few path segments -> unsupported route, no crash.
+    _patch_admin_calls(monkeypatch)
+    resp = app.dispatch_admin({"sub": "a1", "cognito:groups": ["admins"]},
+                              "/admin/collectors", {})
+    assert _status_of(resp) == 400
+
+
+# ===================== Collector upload-url content-type gate (NIT#5) ========
+
+def test_upload_url_rejects_bad_doc_type(monkeypatch):
+    monkeypatch.setattr(app, "collectors_table", object())
+    monkeypatch.setattr(app, "COLLECTOR_DOCS_BUCKET", "bucket")
+    resp = app.collector_upload_url({"sub": "u1"},
+                                    {"docType": "passport", "contentType": "image/png"})
+    assert _status_of(resp) == 400
+
+
+def test_upload_url_rejects_content_type_outside_allowlist(monkeypatch):
+    monkeypatch.setattr(app, "collectors_table", object())
+    monkeypatch.setattr(app, "COLLECTOR_DOCS_BUCKET", "bucket")
+    for bad in ("image/gif", "application/zip", "text/html", ""):
+        resp = app.collector_upload_url({"sub": "u1"},
+                                        {"docType": "license", "contentType": bad})
+        assert _status_of(resp) == 400
+
+
+def test_upload_url_allowlist_matches_expected_set():
+    # Lock the exact allow-list so a future edit can't silently widen it.
+    assert app.UPLOAD_CONTENT_TYPES == {"image/png", "image/jpeg", "application/pdf"}
+
+
+def test_upload_url_service_unavailable_without_bucket(monkeypatch):
+    # Missing bucket env var -> 503, never a crash on first use.
+    monkeypatch.setattr(app, "collectors_table", object())
+    monkeypatch.setattr(app, "COLLECTOR_DOCS_BUCKET", "")
+    resp = app.collector_upload_url({"sub": "u1"},
+                                    {"docType": "license", "contentType": "application/pdf"})
+    assert _status_of(resp) == 503
+
+
+# ===================== Duplicate-quote scan (request_collect step 8) =========
+
+def test_request_collect_duplicate_live_quote_paid_409(monkeypatch):
+    # A second live quote by the SAME collector on a paid item is a 409, even
+    # for an approved collector with a valid amount.
+    cap = _setup_request_collect(monkeypatch,
+                                 _open_waste("user_pays", max_price="50.00"),
+                                 approved=True)
+
+    def _query(**k):
+        return {"Items": [{"collectorId": "col-9", "status": "accepted"}]}
+    cap.query = _query
+    resp = app.request_collect({"sub": "col-9"},
+                               {"wasteId": "w1", "quoteAmount": "10.00"})
+    assert _status_of(resp) == 409
+
+
+def test_request_collect_other_collectors_quote_not_a_duplicate(monkeypatch):
+    # A live quote by a DIFFERENT collector must NOT block this collector.
+    cap = _setup_request_collect(monkeypatch,
+                                 _open_waste("user_pays", max_price="50.00"),
+                                 approved=True)
+
+    def _query(**k):
+        return {"Items": [{"collectorId": "someone-else", "status": "requested"}]}
+    cap.query = _query
+    resp = app.request_collect({"sub": "col-9"},
+                               {"wasteId": "w1", "quoteAmount": "10.00"})
+    assert isinstance(resp, dict)
+    assert _status_of(resp) == 200
+
+
+def test_request_collect_terminal_quote_not_a_duplicate(monkeypatch):
+    # A prior quote by the same collector that is NOT in LIVE_QUOTE_STATUSES
+    # (e.g. 'rejected'/'cancelled') must not block a fresh quote.
+    cap = _setup_request_collect(monkeypatch,
+                                 _open_waste("user_pays", max_price="50.00"),
+                                 approved=True)
+
+    def _query(**k):
+        return {"Items": [{"collectorId": "col-9", "status": "rejected"}]}
+    cap.query = _query
+    resp = app.request_collect({"sub": "col-9"},
+                               {"wasteId": "w1", "quoteAmount": "10.00"})
+    assert isinstance(resp, dict)
+    assert _status_of(resp) == 200
+
+
+# ===================== Unlock-status single source of truth ==================
+
+def test_unlock_and_chat_statuses_are_identical_and_exclude_collecting():
+    # Invariant (a): no contact/chat before 'confirmed'. 'collecting' is a
+    # WASTE-ITEM status and must never appear in the unlock/chat tuples.
+    assert app.UNLOCK_STATUSES == app.CHAT_STATUSES
+    assert app.UNLOCK_STATUSES == ("confirmed", "collected", "disputed")
+    assert "collecting" not in app.UNLOCK_STATUSES
+    assert "requested" not in app.UNLOCK_STATUSES
+    assert "accepted" not in app.UNLOCK_STATUSES
