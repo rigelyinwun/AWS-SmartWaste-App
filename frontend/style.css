@@ -128,6 +128,13 @@ header::after {
     transition: background 0.2s, transform 0.15s, box-shadow 0.2s;
 }
 
+/* The explicit display:flex above overrides the native [hidden] attribute, so
+   a hidden icon button (e.g. the admin shield for non-admins) would still
+   show. Restore hiding for any header icon button toggled via `hidden`. */
+.header-icon-btn[hidden] {
+    display: none;
+}
+
 .header-icon-btn:hover {
     background: rgba(255, 255, 255, 0.3);
     transform: translateY(-2px);
@@ -2362,6 +2369,15 @@ body.on-subpage footer {
 
 .btn-profile-delete:hover {
     background: #ffebee;
+}
+
+/* Admin collector queue: Approve + Reject share equal width so Reject
+   doesn't stretch wider than Approve. */
+.admin-collector-card .notif-detail-actions .btn-profile-primary,
+.admin-collector-card .notif-detail-actions .btn-profile-delete {
+    flex: 1 1 0;
+    min-width: 0;
+    text-align: center;
 }
 
 /* Profile messages */
