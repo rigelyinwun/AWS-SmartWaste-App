@@ -1855,8 +1855,47 @@
         reportOverlay.classList.add('show');
     }
 
+    // Owner edit path: reuse the report form, prefilled from the owner's own
+    // listing. Does NOT depend on lastWasteDetails (that is create-flow analysis
+    // state) and the image is left untouched (optional, no re-upload required).
+    function openEditForm(r) {
+        if (!Auth.isLoggedIn()) { openAuth('login'); return; }
+        if (!r) return;
+
+        reportEditMode = { requestId: r.requestId };
+        var reportTitleEl = document.getElementById('reportTitle');
+        if (reportTitleEl) reportTitleEl.textContent = 'Edit listing';
+        if (reportSubmit) reportSubmit.textContent = 'Save changes';
+        // No fresh analysis in edit mode — hide the AI summary block.
+        if (reportSummary) { reportSummary.innerHTML = ''; reportSummary.hidden = true; }
+
+        // Prefill from the owner view fields (openEditForm is only reached from
+        // the owner's own cards, so contact fields are present).
+        document.getElementById('rfName').value = r.contactName || r.ownerName || '';
+        document.getElementById('rfPhone').value = r.phone || '';
+        document.getElementById('rfAddress').value = r.fullAddress || '';
+        document.getElementById('rfArea').value = r.area || '';
+        document.getElementById('rfPickup').value = r.pickupTime || '';
+        document.getElementById('rfNotes').value = r.notes || '';
+
+        var rfPriceTypeEl = document.getElementById('rfPriceType');
+        if (rfPriceTypeEl) rfPriceTypeEl.value = (r.priceType === 'free') ? 'free' : 'user_pays';
+        document.getElementById('rfCurrency').value = r.currency || 'MYR';
+        document.getElementById('rfMaxPrice').value = (r.maxPrice != null) ? String(r.maxPrice) : '';
+        updatePriceTypeFields();
+
+        hideEl('reportError'); hideEl('reportSuccess');
+        reportOverlay.classList.add('show');
+    }
+
     function closeReportForm() {
         reportOverlay.classList.remove('show');
+        // Reset back to the create defaults so the next open starts clean.
+        reportEditMode = null;
+        var reportTitleEl = document.getElementById('reportTitle');
+        if (reportTitleEl) reportTitleEl.textContent = 'List waste for collection';
+        if (reportSubmit) reportSubmit.textContent = 'List for Collection';
+        if (reportSummary) reportSummary.hidden = false;
     }
 
     // Toggle the price fields based on the chosen listing type. A free giveaway
@@ -1890,8 +1929,11 @@
         e.preventDefault();
         hideEl('reportError'); hideEl('reportSuccess');
 
-        // Guard: never allow listing without a current valid analysis.
-        if (!lastWasteDetails) {
+        var isEdit = !!reportEditMode;
+
+        // Guard: creating a listing requires a current valid analysis. Editing an
+        // existing listing does NOT (no image re-upload / re-analysis required).
+        if (!isEdit && !lastWasteDetails) {
             showMsg('reportError', 'Please analyze a valid waste item first.', true);
             return;
         }
@@ -1931,25 +1973,41 @@
             }
         }
 
-        var w = wasteSummaryFromAnalysis();
-        var body = {
-            wasteType: w.wasteType,
-            category: w.category,
-            description: w.description,
-            weight: w.weight,
-            contactName: name,
-            phone: phone,
-            fullAddress: address,
-            area: document.getElementById('rfArea').value.trim(),
-            pickupTime: document.getElementById('rfPickup').value.trim(),
-            notes: document.getElementById('rfNotes').value.trim(),
-            // 'free' = give away (any user collects); 'user_pays' = owner pays a
-            // verified business to remove it.
-            priceType: priceType,
-            // Sent so the server can re-validate the image before listing.
-            file_data: fileData,
-            file_mime: fileMime,
-        };
+        var body;
+        if (isEdit) {
+            // Edit mode: only the owner-editable fields + the item id. No waste
+            // analysis fields and no image (preserve the stored image/validation).
+            body = {
+                requestId: reportEditMode.requestId,
+                contactName: name,
+                phone: phone,
+                fullAddress: address,
+                area: document.getElementById('rfArea').value.trim(),
+                pickupTime: document.getElementById('rfPickup').value.trim(),
+                notes: document.getElementById('rfNotes').value.trim(),
+                priceType: priceType,
+            };
+        } else {
+            var w = wasteSummaryFromAnalysis();
+            body = {
+                wasteType: w.wasteType,
+                category: w.category,
+                description: w.description,
+                weight: w.weight,
+                contactName: name,
+                phone: phone,
+                fullAddress: address,
+                area: document.getElementById('rfArea').value.trim(),
+                pickupTime: document.getElementById('rfPickup').value.trim(),
+                notes: document.getElementById('rfNotes').value.trim(),
+                // 'free' = give away (any user collects); 'user_pays' = owner pays a
+                // verified business to remove it.
+                priceType: priceType,
+                // Sent so the server can re-validate the image before listing.
+                file_data: fileData,
+                file_mime: fileMime,
+            };
+        }
         // Currency + maxPrice only apply to the paid lane.
         if (priceType !== 'free') {
             body.currency = document.getElementById('rfCurrency').value;
@@ -1957,14 +2015,27 @@
         }
 
         reportSubmit.disabled = true;
-        collectFetch('POST', body, 'report').then(function() {
-            reportSubmit.disabled = false;
-            closeReportForm();
-            document.getElementById('reportDoneOverlay').classList.add('show');
-        }).catch(function(err) {
-            reportSubmit.disabled = false;
-            showMsg('reportError', err.message, true);
-        });
+        if (isEdit) {
+            collectFetch('POST', body, 'edit').then(function() {
+                reportSubmit.disabled = false;
+                closeReportForm();
+                // Refresh both views so the edited details show immediately.
+                loadPortalList();
+                loadPortalHistory();
+            }).catch(function(err) {
+                reportSubmit.disabled = false;
+                showMsg('reportError', err.message, true);
+            });
+        } else {
+            collectFetch('POST', body, 'report').then(function() {
+                reportSubmit.disabled = false;
+                closeReportForm();
+                document.getElementById('reportDoneOverlay').classList.add('show');
+            }).catch(function(err) {
+                reportSubmit.disabled = false;
+                showMsg('reportError', err.message, true);
+            });
+        }
     });
 
     // Report success confirmation -> OK opens the portal.
@@ -2362,7 +2433,7 @@
                 // Public list: request to collect someone else's item. The viewer
                 // cannot request their own listing.
                 if (isMine) {
-                    html += '<button type="button" class="btn-request-track" data-req="' + escapeHtml(r.requestId) + '">Manage</button>';
+                    html += '<button type="button" class="btn-request-manage" data-req="' + escapeHtml(r.requestId) + '">Manage</button>';
                 } else {
                     html += '<button type="button" class="btn-request-collect" data-req="' + escapeHtml(r.requestId) + '">Request Collect</button>';
                 }
@@ -2381,9 +2452,9 @@
                     html += '<button type="button" class="btn-request-track" data-done-cr="' + escapeHtml(cr.collectRequestId) + '" disabled>' +
                         '<i class="fa-solid fa-flag-checkered"></i> Collected</button>';
                 } else if ((r.status || 'open') === 'open') {
-                    // Still pending — nobody has requested it yet, so there is
-                    // nothing to track. Show a disabled "Track Request".
-                    html += '<button type="button" class="btn-request-track" disabled title="No collection requests yet">Track Request</button>';
+                    // Still pending — nobody has confirmed a collection yet, so
+                    // the owner can edit the listing details. Show "Manage".
+                    html += '<button type="button" class="btn-request-manage" data-req="' + escapeHtml(r.requestId) + '">Manage</button>';
                 } else {
                     // Item has been requested (or further along) — tracking is live.
                     html += '<button type="button" class="btn-request-track" data-req="' + escapeHtml(r.requestId) + '">Track Request</button>';
@@ -2463,6 +2534,11 @@
         if (!btn) return;
         var r = findRequest(btn.getAttribute('data-req'));
         if (!r) return;
+        if (btn.classList.contains('btn-request-manage')) {
+            // Owner Manage -> open the edit form prefilled from their listing.
+            openEditForm(r);
+            return;
+        }
         if (btn.classList.contains('btn-request-view') ||
             btn.classList.contains('btn-request-collect')) {
             // View Details and Request Collect both open the detail overlay,

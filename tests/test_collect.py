@@ -500,6 +500,89 @@ def test_create_report_missing_pricetype_defaults_to_user_pays(monkeypatch):
     assert cap.put_items[0]["priceType"] == "user_pays"
 
 
+# ===================== edit_report owner/status guard + partial update ========
+
+class _UpdateTable:
+    """Captures update_item so we can assert the partial UpdateExpression."""
+    def __init__(self):
+        self.updates = []
+
+    def update_item(self, **k):
+        self.updates.append(k)
+
+
+def _editable_waste(status="open", owner="owner-1", price_type="user_pays"):
+    return {"requestId": "w1", "ownerId": owner, "status": status,
+            "wasteType": "Bottles", "priceType": price_type, "currency": "MYR",
+            "description": "old desc", "notes": "old notes", "phone": "111"}
+
+
+def _setup_edit_report(monkeypatch, waste):
+    cap = _UpdateTable()
+    monkeypatch.setattr(app, "table", cap)
+    monkeypatch.setattr(app, "_get_waste", lambda wid: waste)
+    # Guard against accidental image re-validation: blow up if called.
+    monkeypatch.setattr(app, "validate_image",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("validate_image called")))
+    return cap
+
+
+# (a) a non-owner cannot edit -> 403.
+def test_edit_report_non_owner_403(monkeypatch):
+    _setup_edit_report(monkeypatch, _editable_waste())
+    resp = app.edit_report({"sub": "someone-else"},
+                           {"requestId": "w1", "notes": "hacked"})
+    assert _status_of(resp) == 403
+
+
+# (b) owner + open status succeeds, writes only the provided field, and leaves an
+#     omitted field out of the UpdateExpression values (partial update).
+def test_edit_report_owner_open_partial_update(monkeypatch):
+    cap = _setup_edit_report(monkeypatch, _editable_waste())
+    resp = app.edit_report({"sub": "owner-1"},
+                           {"requestId": "w1", "notes": "new notes"})
+    assert isinstance(resp, dict)
+    assert _status_of(resp) == 200
+    assert len(cap.updates) == 1
+    vals = cap.updates[0]["ExpressionAttributeValues"]
+    # Only the submitted field is written; omitted 'description' is untouched.
+    assert vals[":notes"] == "new notes"
+    assert ":description" not in vals
+    # The returned owner view reflects the change.
+    assert resp["notes"] == "new notes"
+
+
+# (c) owner but item no longer open -> 409.
+def test_edit_report_non_open_409(monkeypatch):
+    for status in ("collecting", "collected", "closed", "disputed"):
+        cap = _setup_edit_report(monkeypatch, _editable_waste(status=status))
+        resp = app.edit_report({"sub": "owner-1"},
+                               {"requestId": "w1", "notes": "x"})
+        assert _status_of(resp) == 409
+        assert cap.updates == []  # nothing written on a blocked edit
+
+
+# (d) switching to free drops maxPrice via a REMOVE clause (no :maxPrice set).
+def test_edit_report_free_removes_max_price(monkeypatch):
+    cap = _setup_edit_report(monkeypatch, _editable_waste())
+    resp = app.edit_report({"sub": "owner-1"},
+                           {"requestId": "w1", "priceType": "free",
+                            "maxPrice": "20.00"})
+    assert isinstance(resp, dict)
+    expr = cap.updates[0]["UpdateExpression"]
+    assert "REMOVE maxPrice" in expr
+    assert ":maxPrice" not in cap.updates[0].get("ExpressionAttributeValues", {})
+
+
+# (e) an edit WITHOUT a new image never calls validate_image (setup would raise).
+def test_edit_report_no_image_skips_validation(monkeypatch):
+    cap = _setup_edit_report(monkeypatch, _editable_waste())
+    resp = app.edit_report({"sub": "owner-1"},
+                           {"requestId": "w1", "weight": "3kg"})
+    assert isinstance(resp, dict)
+    assert cap.updates[0]["ExpressionAttributeValues"][":weight"] == "3kg"
+
+
 # ===================== Admin prefix dispatch (invariant e) =====================
 # These harden the routing collision guard: /admin/collectors/{id}/approve MUST
 # be captured by the prefix dispatcher and reach the admin handler, NOT the

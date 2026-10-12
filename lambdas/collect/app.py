@@ -584,6 +584,131 @@ def create_report(claims, body):
     return public_view(item, owner=True)
 
 
+def edit_report(claims, body):
+    """Owner-only edit of a posted waste listing.
+
+    Editable-status rule: an item may be edited ONLY while its status is 'open'.
+    'open' is the sole state where no deal is committed (request_collect leaves
+    the item 'open' while quotes accumulate; confirm_deal flips it to
+    'collecting'). Default: NOT editable once a collection is in progress, because
+    a confirmed collector may already be acting on the current details. Any
+    non-open status (collecting/collected/closed/disputed/unknown) returns 409.
+
+    Partial update: only fields actually present in the body are written, so an
+    edit that omits a field leaves the stored value untouched. ownerId/requestId/
+    createdAt/status are never changed. The image is re-validated only when a new
+    one is supplied; otherwise the stored image/validation state is preserved."""
+    if not table:
+        return json_response({"error": "Service unavailable"}, status=503)
+
+    waste_id = _s(body.get("requestId")) or _s(body.get("wasteId"))
+    if not waste_id:
+        return json_response({"error": "Missing waste item id"}, status=400)
+
+    item = _get_waste(waste_id)
+    if not item:
+        return json_response({"error": "Waste item not found"}, status=404)
+    if claims["sub"] != item.get("ownerId"):
+        return json_response({"error": "Not authorized"}, status=403)
+    if item.get("status") not in ("open",):
+        return json_response(
+            {"error": "This item can no longer be edited because a collection is in progress."},
+            status=409,
+        )
+
+    # Re-validate only when a NEW image is actually supplied in the edit body.
+    # No image in the body => leave the stored image/validation state untouched.
+    if _s(body.get("file_data")) and _s(body.get("file_mime")):
+        if not validate_image(body.get("file_data"), body.get("file_mime"), body.get("description")):
+            return json_response({"error": REPORT_REJECTION}, status=400)
+
+    def dec(v):
+        try:
+            return Decimal(str(float(v)))
+        except (TypeError, ValueError):
+            return None
+
+    # Build a partial update from ONLY the allowed keys present in the body.
+    # Same _s() trimming + length caps as create_report. Omitted keys are left
+    # alone (never wiped). ownerId/requestId/createdAt/status are not touched.
+    set_parts = []
+    remove_parts = []
+    names = {}
+    values = {}
+
+    def _set(attr, value):
+        ph = "#%s" % attr
+        vph = ":%s" % attr
+        names[ph] = attr
+        values[vph] = value
+        set_parts.append("%s = %s" % (ph, vph))
+
+    capped = {
+        "description": 1000,
+        "fullAddress": 300,
+        "area": 160,
+        "notes": 500,
+    }
+    simple_fields = ("pickupTime", "phone", "contactName", "fullAddress",
+                     "area", "notes", "weight", "description")
+    for key in simple_fields:
+        if key in body:
+            val = _s(body.get(key))
+            if key in capped:
+                val = val[:capped[key]]
+            _set(key, val)
+
+    # Pricing settings (only if present). Same whitelist / normalization as
+    # create_report. A 'free' giveaway has no ceiling, so REMOVE any stored
+    # maxPrice; a paid listing records maxPrice when a valid value is supplied.
+    if "priceType" in body:
+        price_type = _s(body.get("priceType"))
+        _set("priceType", price_type if price_type in ("free", "user_pays") else "user_pays")
+    if "currency" in body:
+        _set("currency", (_s(body.get("currency")) or "MYR")[:3].upper())
+    if "priceType" in body and _s(body.get("priceType")) == "free":
+        remove_parts.append("maxPrice")
+    elif "maxPrice" in body:
+        max_price = _dec_price(body.get("maxPrice"))
+        if max_price is not None:
+            _set("maxPrice", max_price)
+
+    # lat/lng only when BOTH provided (mirror create_report).
+    if "lat" in body and "lng" in body:
+        lat, lng = dec(body.get("lat")), dec(body.get("lng"))
+        if lat is not None and lng is not None:
+            _set("lat", lat)
+            _set("lng", lng)
+
+    if not set_parts and not remove_parts:
+        # Nothing to change — return the current item as-is.
+        return public_view(item, owner=True)
+
+    expr = ""
+    if set_parts:
+        expr += "SET " + ", ".join(set_parts)
+    if remove_parts:
+        expr += (" " if expr else "") + "REMOVE " + ", ".join(remove_parts)
+
+    kwargs = {
+        "Key": {"requestId": waste_id},
+        "UpdateExpression": expr,
+    }
+    if names:
+        kwargs["ExpressionAttributeNames"] = names
+    if values:
+        kwargs["ExpressionAttributeValues"] = values
+    table.update_item(**kwargs)
+
+    # Reflect the change locally for the return view (avoids a second read).
+    for vph, val in values.items():
+        item[vph[1:]] = val
+    for attr in remove_parts:
+        item.pop(attr, None)
+
+    return public_view(item, owner=True)
+
+
 def public_view(item, owner=False):
     """Shape a request for the client. Hides fullAddress/phone unless the
     viewer is the owner (full unlock-on-approval comes in a later stage)."""
@@ -1822,6 +1947,8 @@ def handler(path):
                 return _unwrap(dispatch_collector(claims, route, body))
             if route.endswith("report"):
                 return _unwrap(create_report(claims, body))
+            if route.endswith("edit"):
+                return _unwrap(edit_report(claims, body))
             if route.endswith("request"):
                 return _unwrap(request_collect(claims, body))
             if route.endswith("approve"):
