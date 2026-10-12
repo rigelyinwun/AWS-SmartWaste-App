@@ -2104,17 +2104,20 @@
             var incoming = (data && data.incoming) || [];
             var outgoing = (data && data.outgoing) || [];
 
-            // Build wasteId -> most relevant incoming collect-request, preferring
-            // 'confirmed' (active button) over 'collected' (disabled button).
+            // Build wasteId -> the MOST-ADVANCED incoming collect-request so the
+            // History Posted card can show the real lifecycle. The waste item
+            // itself stays 'open' under the multi-quote model (it only flips at
+            // confirm/collect), so the posted tag + button must be driven by the
+            // collect-request status, not the waste-item status. Rank picks the
+            // furthest-along request on each item.
+            var CR_RANK = { requested: 1, accepted: 2, confirmed: 3, collected: 4, done: 4 };
             var crByWaste = {};
             incoming.forEach(function(cr) {
                 if (!cr || !cr.wasteId) return;
+                var rank = CR_RANK[cr.status] || 0;
+                if (rank === 0) return;  // rejected/cancelled/closed/disputed: ignore
                 var existing = crByWaste[cr.wasteId];
-                if (!existing) {
-                    if (cr.status === 'confirmed' || cr.status === 'collected') {
-                        crByWaste[cr.wasteId] = cr;
-                    }
-                } else if (existing.status !== 'confirmed' && cr.status === 'confirmed') {
+                if (!existing || rank > (CR_RANK[existing.status] || 0)) {
                     crByWaste[cr.wasteId] = cr;
                 }
             });
@@ -2405,13 +2408,17 @@
             html += '<div class="request-card-head">';
             html += '<div class="request-title">' + escapeHtml(r.wasteType || 'Waste item') + '</div>';
             // Public list shows an "Available" / "Your listing" tag (not the
-            // owner-only lifecycle status). History (posted) keeps the status.
+            // owner-only lifecycle status). History (posted) shows the real
+            // lifecycle: driven by the matching collect-request status when one
+            // exists (requested/accepted/confirmed/collected), else the waste
+            // item's own status (open -> "Pending").
+            var postedCr = (!isPublic) ? crByWaste[r.requestId] : null;
             if (isPublic) {
                 html += isMine
                     ? '<span class="status-badge status-mine">Your listing</span>'
                     : '<span class="status-badge status-available">Available</span>';
             } else {
-                html += statusBadge(r.status);
+                html += statusBadge(postedCr ? postedCr.status : r.status);
             }
             html += '</div>';
             html += '<div class="request-submitted">Submitted ' + escapeHtml(fmtTime(r.createdAt)) + '</div>';
@@ -2439,25 +2446,27 @@
                 }
             } else {
                 // History (your posts): the button is driven by the matching
-                // COLLECT-REQUEST status (confirmed/collected) from crByWaste,
-                // never by the waste-item status. 'confirmed' -> active Mark as
-                // Collected; 'collected' -> disabled "Collected"; otherwise the
-                // usual Track Request. All mark-as-collected buttons funnel
-                // through the same 'done' action (see onPortalCardClick).
-                var cr = crByWaste[r.requestId];
-                if (cr && cr.status === 'confirmed') {
-                    html += '<button type="button" class="btn-request-track" data-done-cr="' + escapeHtml(cr.collectRequestId) + '">' +
+                // COLLECT-REQUEST status from crByWaste (never the waste-item
+                // status, which stays 'open' under multi-quote). Progression:
+                //   no request yet (pending) -> Manage (edit listing)
+                //   requested / accepted      -> Track Request
+                //   confirmed                 -> Mark as Collected
+                //   collected                 -> disabled "Collected"
+                // All mark-as-collected buttons funnel through the same 'done'
+                // action (see onPortalCardClick).
+                var cs = postedCr ? postedCr.status : null;
+                if (cs === 'confirmed') {
+                    html += '<button type="button" class="btn-request-track" data-done-cr="' + escapeHtml(postedCr.collectRequestId) + '">' +
                         '<i class="fa-solid fa-flag-checkered"></i> Mark as Collected</button>';
-                } else if (cr && cr.status === 'collected') {
-                    html += '<button type="button" class="btn-request-track" data-done-cr="' + escapeHtml(cr.collectRequestId) + '" disabled>' +
+                } else if (cs === 'collected' || cs === 'done') {
+                    html += '<button type="button" class="btn-request-track" data-done-cr="' + escapeHtml(postedCr.collectRequestId) + '" disabled>' +
                         '<i class="fa-solid fa-flag-checkered"></i> Collected</button>';
-                } else if ((r.status || 'open') === 'open') {
-                    // Still pending — nobody has confirmed a collection yet, so
-                    // the owner can edit the listing details. Show "Manage".
-                    html += '<button type="button" class="btn-request-manage" data-req="' + escapeHtml(r.requestId) + '">Manage</button>';
-                } else {
-                    // Item has been requested (or further along) — tracking is live.
+                } else if (cs === 'requested' || cs === 'accepted') {
+                    // Someone has requested/been accepted — tracking is live.
                     html += '<button type="button" class="btn-request-track" data-req="' + escapeHtml(r.requestId) + '">Track Request</button>';
+                } else {
+                    // No active request yet (pending) — owner can edit the listing.
+                    html += '<button type="button" class="btn-request-manage" data-req="' + escapeHtml(r.requestId) + '">Manage</button>';
                 }
             }
             html += '</div>';
