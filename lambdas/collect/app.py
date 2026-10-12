@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import traceback
 import urllib.request
@@ -23,6 +24,7 @@ REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 REQUESTS_TABLE = os.environ.get("WASTE_REQUESTS_TABLE", "")
 COLLECT_REQUESTS_TABLE = os.environ.get("COLLECT_REQUESTS_TABLE", "")
 NOTIFICATIONS_TABLE = os.environ.get("NOTIFICATIONS_TABLE", "")
+USERS_TABLE = os.environ.get("USERS_TABLE", "")
 USER_POOL_ID = os.environ.get("USER_POOL_ID", "")
 APP_CLIENT_ID = os.environ.get("APP_CLIENT_ID", "")
 
@@ -38,6 +40,7 @@ dynamodb = boto3.resource("dynamodb", region_name=REGION)
 table = dynamodb.Table(REQUESTS_TABLE) if REQUESTS_TABLE else None
 creq_table = dynamodb.Table(COLLECT_REQUESTS_TABLE) if COLLECT_REQUESTS_TABLE else None
 notif_table = dynamodb.Table(NOTIFICATIONS_TABLE) if NOTIFICATIONS_TABLE else None
+users_table = dynamodb.Table(USERS_TABLE) if USERS_TABLE else None
 msg_table = dynamodb.Table(MESSAGES_TABLE) if MESSAGES_TABLE else None
 push_table = dynamodb.Table(PUSH_SUBS_TABLE) if PUSH_SUBS_TABLE else None
 
@@ -867,19 +870,32 @@ def notify(user_id, ntype, title, body, meta=None):
     high-value event types."""
     if not notif_table or not user_id:
         return
+    # Build the row once so the realtime payload matches the stored item exactly.
+    row = {
+        "userId": user_id,
+        "createdAt": _now_micros(),
+        "notifId": str(uuid.uuid4()),
+        "type": ntype,
+        "title": title,
+        "body": body,
+        "meta": meta or {},
+        "read": False,
+    }
     try:
-        notif_table.put_item(Item={
-            "userId": user_id,
-            "createdAt": _now_micros(),
-            "notifId": str(uuid.uuid4()),
-            "type": ntype,
-            "title": title,
-            "body": body,
-            "meta": meta or {},
-            "read": False,
-        })
+        notif_table.put_item(Item=row)
     except Exception as e:
         logger.error("notify error: %s", str(e))
+
+    # Realtime: push the new notification to the user's private channel so the
+    # header badge + an open Notifications page update without a manual refresh.
+    # Every notification type is realtime (unlike device push, below). Wrapped so
+    # a publish failure never breaks notification creation.
+    try:
+        token = get_or_create_notify_channel(user_id)
+        if token:
+            _publish_to_appsync(notif_channel_name(token), row)
+    except Exception as e:
+        logger.error("notify realtime publish error: %s", str(e))
 
     # Device push for the important events.
     if ntype in PUSH_TYPES:
@@ -1863,6 +1879,51 @@ def get_messages(claims, cr_id):
     return {"messages": items}
 
 
+def notif_channel_name(token):
+    """Build the per-user realtime notifications channel from its token."""
+    return "notifications/" + token
+
+
+def get_or_create_notify_channel(user_id):
+    """Return the user's private realtime notification token, creating it lazily.
+
+    The token is a random, unguessable value (NOT the Cognito sub) persisted on
+    the user's UsersTable row under `notifyChannel`. Because the browser subscribes
+    with the shared AppSync api key, the channel must not be predictable: a random
+    token means a client can only subscribe to its own channel because it can only
+    learn its own token behind JWT auth (same de-facto protection chat uses with
+    the unguessable collectRequestId). Returns None on any failure so callers fall
+    back to pull-only behaviour.
+    """
+    if not users_table or not user_id:
+        return None
+    try:
+        resp = users_table.get_item(Key={"userId": user_id})
+        item = resp.get("Item") or {}
+        token = item.get("notifyChannel")
+        if token:
+            return token
+        token = secrets.token_urlsafe(24)
+        # update_item with SET creates the row if absent without clobbering an
+        # existing profile row's other attributes.
+        users_table.update_item(
+            Key={"userId": user_id},
+            UpdateExpression="SET notifyChannel = :t",
+            ExpressionAttributeValues={":t": token},
+        )
+        return token
+    except Exception as e:
+        logger.error("get_or_create_notify_channel error: %s", str(e))
+        return None
+
+
+def get_notify_channel(claims):
+    """Authenticated route handler: return ONLY the caller's own channel token.
+    Scoped to claims['sub'] so a client can never learn another user's token."""
+    token = get_or_create_notify_channel(claims["sub"])
+    return {"channel": token or ""}
+
+
 def _publish_to_appsync(channel, payload):
     """Publish one event to the AppSync Events HTTP endpoint using the API key."""
     if not APPSYNC_HTTP_DNS or not APPSYNC_API_KEY:
@@ -1992,6 +2053,8 @@ def handler(path):
             return _unwrap(get_messages(claims, cr_id))
         if route.endswith("analytics"):
             return _unwrap(get_analytics(claims))
+        if route.endswith("notify-channel"):
+            return _unwrap(get_notify_channel(claims))
         return _unwrap(list_public(claims))  # /list or root
 
     except Exception as e:

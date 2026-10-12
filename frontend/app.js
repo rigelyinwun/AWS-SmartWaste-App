@@ -1150,6 +1150,9 @@
 
         // Refresh the notification badge whenever auth state changes.
         if (typeof refreshNotifBadge === 'function') refreshNotifBadge();
+        // Start the app-wide realtime notifications socket while logged in
+        // (idempotent, so safe on login/startup/profile-name changes).
+        if (loggedIn && typeof startNotifChannel === 'function') startNotifChannel();
         // Re-resolve the current route so gated pages redirect on logout / allow on login.
         if (typeof router === 'function' && _routerReady) router();
     }
@@ -1184,6 +1187,9 @@
 
         // Tear down any live chat connection + badge
         if (typeof window.leaveChatPage === 'function') window.leaveChatPage();
+        // Logout tears down BOTH sockets: the chat socket (via leaveChatPage
+        // above) and the app-wide notifications socket here.
+        if (typeof stopNotifChannel === 'function') stopNotifChannel();
         if (notifBadge) notifBadge.hidden = true;
     }
     window.clearUserState = clearUserState;
@@ -3374,6 +3380,129 @@
 
     function stopPolling() {
         if (chatPollTimer) { clearInterval(chatPollTimer); chatPollTimer = null; }
+    }
+
+    // --- Realtime notifications via AppSync Events WebSocket ---
+    // SEPARATE socket from chat (two-socket design): the chat socket is
+    // per-conversation and torn down by leaveChatPage() on every route change
+    // away from chat. The notifications badge is app-wide, so it needs its own
+    // connection that survives leaving the chat page and is only closed on logout.
+    // Mirrors setupRealtime()/teardownRealtime()/startPolling()/stopPolling() but
+    // targets the per-user '/notifications/<token>' channel.
+    var notifSocket = null;        // AppSync WebSocket for notifications
+    var notifPollTimer = null;     // light polling fallback timer
+    var notifChannel = null;       // 'notifications/<token>' currently subscribed
+
+    function setupNotifRealtime(channel) {
+        try {
+            var authObj = { host: APPSYNC_CONFIG.http, 'x-api-key': APPSYNC_CONFIG.apiKey };
+            var header = b64(authObj);
+            var protocols = ['aws-appsync-event-ws', 'header-' + header];
+            notifSocket = new WebSocket('wss://' + APPSYNC_CONFIG.realtime + '/event/realtime', protocols);
+
+            notifSocket.onopen = function() {
+                notifSocket.send(JSON.stringify({ type: 'connection_init' }));
+            };
+            notifSocket.onmessage = function(evt) {
+                var msg;
+                try { msg = JSON.parse(evt.data); } catch (e) { return; }
+                if (msg.type === 'connection_ack') {
+                    notifSocket.send(JSON.stringify({
+                        type: 'subscribe',
+                        id: 'notif-sub',
+                        channel: '/' + channel,
+                        authorization: { host: APPSYNC_CONFIG.http, 'x-api-key': APPSYNC_CONFIG.apiKey },
+                    }));
+                } else if (msg.type === 'data' && msg.event) {
+                    try {
+                        var payload = JSON.parse(msg.event);
+                        onNotifEvent(payload);
+                    } catch (e) { /* ignore */ }
+                }
+            };
+            notifSocket.onerror = function() {
+                // Fall back to light polling if the socket errors.
+                teardownNotifRealtime();
+                startNotifPolling();
+            };
+            notifSocket.onclose = function() {
+                // If we still intend to be subscribed and have no socket, keep the
+                // badge fresh via polling.
+                if (notifChannel === channel && !notifPollTimer) startNotifPolling();
+            };
+        } catch (e) {
+            startNotifPolling();
+        }
+    }
+
+    function teardownNotifRealtime() {
+        if (notifSocket) {
+            try { notifSocket.close(); } catch (e) { /* ignore */ }
+            notifSocket = null;
+        }
+    }
+
+    function startNotifPolling() {
+        stopNotifPolling();
+        notifPollTimer = setInterval(function() {
+            if (typeof refreshNotifBadge === 'function') refreshNotifBadge();
+        }, 15000);
+    }
+
+    function stopNotifPolling() {
+        if (notifPollTimer) { clearInterval(notifPollTimer); notifPollTimer = null; }
+    }
+
+    // Handle one realtime notification: refresh the authoritative badge count and,
+    // if the Notifications page is open, prepend the item to the feed (dedup by id).
+    function onNotifEvent(n) {
+        if (_currentView === 'notifOverlay') {
+            // Page is open: show it immediately at the top and keep read-state in
+            // sync with the existing "clear on view" behaviour.
+            var exists = false;
+            for (var i = 0; i < notifData.length; i++) {
+                if (n && n.notifId && notifData[i].notifId === n.notifId) { exists = true; break; }
+            }
+            if (!exists && n) {
+                notifData.unshift(n);
+                if (typeof renderNotifFeed === 'function') renderNotifFeed();
+            }
+            if (notifBadge) notifBadge.hidden = true;
+            collectFetch('POST', null, 'notifications/read').catch(function() {});
+        } else {
+            // Page not open: just refresh the authoritative unread count.
+            if (typeof refreshNotifBadge === 'function') refreshNotifBadge();
+        }
+    }
+
+    // Fetch the per-user channel token (lazily created server-side) and open the
+    // notifications socket. Idempotent: won't re-open if already live on the same
+    // channel. Falls back to polling if AppSync is unconfigured or the fetch fails.
+    function startNotifChannel() {
+        if (!collectConfigured() || !Auth.isLoggedIn()) return;
+        if (!appsyncConfigured()) {
+            // AppSync not configured: keep badge fresh with light polling only.
+            startNotifPolling();
+            return;
+        }
+        collectFetch('GET', null, 'notify-channel').then(function(data) {
+            var channel = (data && data.channel) || '';
+            if (!channel) { startNotifPolling(); return; }   // server fell back to pull-only
+            if (notifSocket && notifChannel === channel) return;  // already live
+            notifChannel = channel;
+            stopNotifPolling();
+            teardownNotifRealtime();
+            setupNotifRealtime(channel);
+        }).catch(function() {
+            // Fetch failed: keep the pull path working via light polling.
+            startNotifPolling();
+        });
+    }
+
+    function stopNotifChannel() {
+        teardownNotifRealtime();
+        stopNotifPolling();
+        notifChannel = null;
     }
 
     chatPopupClose.addEventListener('click', function() {

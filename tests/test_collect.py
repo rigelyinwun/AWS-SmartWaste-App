@@ -90,6 +90,11 @@ def test_creq_view_unlocks_when_confirmed():
     assert v["ownerPhone"] == "+60"
 
 
+# --- notif_channel_name: build the realtime channel from a token ---
+def test_notif_channel_name():
+    assert app.notif_channel_name("abc") == "notifications/abc"
+
+
 # --- _dec_price: parse money to non-negative 2dp Decimal, else None ---
 def test_dec_price_parses_and_rounds():
     from decimal import Decimal

@@ -416,6 +416,15 @@ Resources:
       ApiId: !GetAtt ChatEventApi.ApiId
       Name: chat
 
+  # Second namespace on the SAME API for per-user realtime notifications.
+  # The collect Lambda's existing appsync:EventPublish on ${ChatEventApi.ApiArn}/*
+  # already covers it, and ChatApiKey is API-scoped so it works across namespaces.
+  NotificationsChannelNamespace:
+    Type: AWS::AppSync::ChannelNamespace
+    Properties:
+      ApiId: !GetAtt ChatEventApi.ApiId
+      Name: notifications
+
   ChatApiKey:
     Type: AWS::AppSync::ApiKey
     Properties:
@@ -462,6 +471,7 @@ Resources:
           COLLECTORS_TABLE: !Ref CollectorsTable
           COLLECTOR_DOCS_BUCKET: !Ref CollectorDocsBucket
           NOTIFICATIONS_TABLE: !Ref NotificationsTable
+          USERS_TABLE: !Ref UsersTable
           MESSAGES_TABLE: !Ref MessagesTable
           PUSH_SUBS_TABLE: !Ref PushSubscriptionsTable
           USER_POOL_ID: !Ref UserPool
