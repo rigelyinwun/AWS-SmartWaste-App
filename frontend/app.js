@@ -3423,8 +3423,23 @@
     // Mirrors setupRealtime()/teardownRealtime()/startPolling()/stopPolling() but
     // targets the per-user '/notifications/<token>' channel.
     var notifSocket = null;        // AppSync WebSocket for notifications
-    var notifPollTimer = null;     // light polling fallback timer
+    var notifPollTimer = null;     // light polling fallback timer (socket down)
+    var badgePollTimer = null;     // always-on badge-count poll (any page)
     var notifChannel = null;       // 'notifications/<token>' currently subscribed
+
+    // Always-on badge poll: keeps the unread count fresh on every page while
+    // logged in, regardless of the realtime socket. Separate from the
+    // socket-fallback poll so the two don't clobber each other's timers.
+    function startBadgePoll() {
+        if (badgePollTimer) return;
+        badgePollTimer = setInterval(function() {
+            if (_currentView === 'notifOverlay') return;  // page open = clear-on-view
+            if (typeof refreshNotifBadge === 'function') refreshNotifBadge();
+        }, 20000);
+    }
+    function stopBadgePoll() {
+        if (badgePollTimer) { clearInterval(badgePollTimer); badgePollTimer = null; }
+    }
 
     function setupNotifRealtime(channel) {
         try {
@@ -3519,6 +3534,13 @@
     // channel. Falls back to polling if AppSync is unconfigured or the fetch fails.
     function startNotifChannel() {
         if (!collectConfigured() || !Auth.isLoggedIn()) return;
+        // Always-on safety net: poll the authoritative badge count on a timer
+        // while logged in, on EVERY page, independent of the realtime socket.
+        // Realtime gives the instant bump; this guarantees the badge still
+        // updates (within the interval) on any page even if a socket event is
+        // missed or races DynamoDB's eventual consistency — so the badge never
+        // requires a manual page refresh.
+        startBadgePoll();
         if (!appsyncConfigured()) {
             // AppSync not configured: keep badge fresh with light polling only.
             startNotifPolling();
@@ -3541,6 +3563,7 @@
     function stopNotifChannel() {
         teardownNotifRealtime();
         stopNotifPolling();
+        stopBadgePoll();
         notifChannel = null;
     }
 
