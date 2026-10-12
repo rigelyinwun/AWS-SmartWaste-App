@@ -27,9 +27,14 @@ AI-powered waste analysis, disposal guidance, and a verified-collector waste mar
 - **Admin verification queue** — an admin-only page (`#/admin/collectors`, gated by a Cognito `admins` group) lists pending collectors with their documents and **approves / rejects / suspends** them.
 - **Address stays private until the deal is confirmed** — see *Collection lifecycle & the "confirm" gate* below.
 - **Demo payment screen** — a paid pickup shows a mock "Pay" dialog at the confirm step. It is a **placeholder only — it moves no money and uses no payment processor** (the slot where the Phase 2 Stripe integration will go).
-- **Waste Collect Portal** — browse all open public listings with search + filters (type, date, distance), and a **History** tab split into *Posted* (your listings) and *Collected* (items you collected from others).
+- **Edit a listing** — while a listing is still open (no active request yet), the owner can **Manage** it to edit the pickup/contact details (collection time, phone, address, notes, etc.). Editing locks once a collector has requested it.
+- **Waste Collect Portal** — browse all open public listings with search + filters (type, date, distance), and a **History** tab split into *Posted* (your listings) and *Collected* (items you collected from others). The *Posted* card reflects the live lifecycle: **pending → Manage · requested/accepted → Track Request · confirmed → Mark as Collected · collected → Collected**.
+- **Analytics dashboard** — below History, a per-user summary of what you've collected: total count + weight, a monthly/yearly collection line chart, a waste-type pie chart (Chart.js), and two conic-gradient "circular bar" widgets for **% landfill saved** and **% climate gas (CO₂e) saved**. All figures are computed deterministically server-side from a static per-waste-type impact-factor table (with a cached, fail-closed Bedrock fallback only for unknown types).
 - **Real-time chat** — owner/collector pairs chat via AWS AppSync Events (WebSocket), with an automatic polling fallback. Chat opens only after the deal is confirmed.
+- **Real-time in-app notifications** — the header unread badge and the Notifications feed update **live via AWS AppSync Events** (no manual refresh) when a request/approval/message/etc. arrives, with a polling fallback. Each user subscribes to a **private, unguessable per-user channel** (see *Auth model*).
 - **Device push notifications** — opt-in **Web Push** (via a service worker + VAPID) delivers OS-level notifications for new collect requests, approvals, and chat messages **even when the tab or browser is closed** (like YouTube's web notifications).
+- **Per-tab sessions** — the Cognito session is stored in `sessionStorage` (not `localStorage`), so you can be signed in as **different accounts in different browser tabs** at once. Trade-off: a session does not persist after a tab is closed.
+- **Responsive phone layout** — on phone-width screens the Notifications and Chat pages switch from a two-column master-detail to a mobile email-app flow: the list fills the screen and tapping an item opens a full-screen detail/thread with a Back control. Desktop keeps the side-by-side layout.
 
 The app is a single-page app with hash-based routing (`#/profile`, `#/portal`, `#/chat`, `#/notifications`, `#/admin/collectors`) so pages are bookmarkable and refresh-safe on a static host.
 
@@ -79,7 +84,7 @@ Also: `rejected` / `cancelled` / `closed` / `disputed` are all **soft status cha
 
           Amazon S3 (private CollectorDocsBucket — collector verification documents, presigned PUT/GET)
 
-          AWS AppSync Events (real-time chat pub/sub, API-key auth)   •   Web Push (VAPID → browser push services)
+   AWS AppSync Events (real-time chat + in-app notifications pub/sub, API-key auth)   •   Web Push (VAPID → browser push services)
 ```
 
 ### Service-by-service
@@ -89,9 +94,10 @@ Also: `rejected` / `cancelled` / `closed` / `disputed` are all **soft status cha
 | **Amazon Bedrock** (Claude Haiku 4.5, global inference profile) | Image + text waste analysis across all analysis Lambdas; chat assistant; content validation; waste-type enrichment; multilingual trading-search terms |
 | **AWS Lambda** (+ Lambda Web Adapter, Flask, Python 3.12) | All 7 backend functions, exposed via **Function URLs** (streamed for analysis/chat, buffered JSON for profile/collect/facilities) |
 | **Amazon Cognito** (User Pool + public app client + `admins` group) | User accounts, real email-verification sign-up, login, and the JWTs that authorize the profile/collect APIs; the **`admins`** group gates the collector-verification admin routes (checked via the `cognito:groups` claim on the verified ID token — a newly-added admin must re-login for the claim to appear) |
-| **Amazon DynamoDB** (8 tables, PAY_PER_REQUEST) | `users`, `feedback`, `waste_requests` (+GSIs), `collect_requests` (+GSIs), `notifications`, `messages`, `push_subscriptions`, `collectors` (+`statusIndex` GSI — verified-business records; a user's account type is **derived** from this table rather than a Cognito custom attribute, to avoid a user-pool replacement) |
+| **Amazon DynamoDB** (8 tables, PAY_PER_REQUEST) | `users` (profile + a lazily-generated random **notification channel token**), `feedback`, `waste_requests` (+GSIs), `collect_requests` (+GSIs), `notifications`, `messages`, `push_subscriptions`, `collectors` (+`statusIndex` GSI — verified-business records; a user's account type is **derived** from this table rather than a Cognito custom attribute, to avoid a user-pool replacement) |
 | **Amazon Location Service** (geo-places + maps) | Server-side geocoding & POI search for nearby facilities (Lambda IAM role); browser map tiles via a scoped API key (MapLibre) |
-| **AWS AppSync Events** (+ ChannelNamespace + API key) | Real-time chat push between confirmed pairs (publish is JWT-authorized server-side; browser subscribes with the API key) |
+| **AWS AppSync Events** (2 ChannelNamespaces + API key) | Real-time **chat** (`chat/<collectRequestId>`) between confirmed pairs, and real-time **in-app notifications** (`notifications/<per-user-token>`) for the badge/feed. Publishing is server-side from the `collect` Lambda; the browser subscribes with the shared API key, so both channels are keyed by **unguessable tokens** (a UUID conversation id, and a random per-user notification token) so one user can't subscribe to another's stream |
+| **Chart.js** (CDN, pinned) | The analytics dashboard's monthly/yearly collection line chart and waste-type pie chart (the two % widgets are pure CSS conic-gradient rings, no library) |
 | **Web Push** (W3C Push API + VAPID, `pywebpush`) | OS-level device notifications for new requests, approvals, and chat messages while the tab/browser is closed; a service worker (`sw.js`) receives pushes, the `collect` Lambda signs them with the VAPID keypair and sends to each browser's push service |
 | **Amazon S3** | Static website hosting (frontend); a separate **private `CollectorDocsBucket`** (all public access blocked) holds collector verification documents, written/read via short-lived presigned URLs |
 | **Amazon CloudFront** | HTTPS + CDN caching in front of S3 |
@@ -106,13 +112,15 @@ Also: `rejected` / `cancelled` / `closed` / `disputed` are all **soft status cha
 - Addresses & phone numbers in listings stay **masked** in the public list and unlock to the collector only **after the deal is confirmed** (not at request or acceptance) — the on-platform "disintermediation gate." Chat opens at the same point.
 - **Admin routes** (`/admin/collectors/...`) require the `admins` group claim and are matched by a **prefix dispatcher that runs before** the suffix-matched route chain, so e.g. `/admin/collectors/{id}/approve` is never mis-routed to the request-approval handler.
 - **Collector verification documents** live in a private bucket and are only ever reachable through short-lived presigned URLs (uploads are constrained to an image/PDF content-type allow-list).
+- **Real-time notification channels are per-user and unguessable.** Because the browser subscribes to AppSync with the shared API key, notifications are published to `notifications/<token>` where `<token>` is a random `secrets.token_urlsafe` value stored on the user's record — never the predictable Cognito `sub`. A client learns **only its own** token, from a JWT-authenticated `notify-channel` route scoped to the caller, so it can never subscribe to another user's notification stream. (The chat channel relies on the same idea: its id is an unguessable `collectRequestId` UUID.)
+- **Sessions are per-tab.** The Cognito session lives in `sessionStorage`, so two browser tabs can hold two different accounts without clobbering each other; the token store the SDK reads is the same per-tab store, so a tab's API calls always use that tab's identity.
 - The map tile key is a browser-scoped Amazon Location key (tiles only); all Places search and chat publishing happen server-side via the Lambda role.
 
 ---
 
 ## Tech stack
 
-- **Frontend:** vanilla HTML / CSS / JavaScript (SPA, hash router), MapLibre GL JS, `amazon-cognito-identity-js`, a service worker + Web Push (VAPID)
+- **Frontend:** vanilla HTML / CSS / JavaScript (SPA, hash router), MapLibre GL JS, Chart.js, `amazon-cognito-identity-js` (per-tab `sessionStorage`), a service worker + Web Push (VAPID), AppSync Events WebSockets (chat + notifications)
 - **Backend:** Python 3.12, Flask, AWS Lambda Web Adapter; `boto3`, `PyJWT` + `cryptography` (JWT verification), `pywebpush` (Web Push)
 - **AI model:** Claude Haiku 4.5 via Amazon Bedrock (`global.anthropic.claude-haiku-4-5-20251001-v1:0`)
 - **IaC / CI-CD:** AWS SAM, GitHub Actions
@@ -132,7 +140,8 @@ smartwaste-app/
 ├── frontend/
 │   ├── index.html                 # SPA shell (header, tabs, pages, modals, injected config)
 │   ├── style.css                  # all styles (responsive)
-│   ├── app.js                     # client logic: analysis, auth, router, portal, chat, notifications, push
+│   ├── app.js                     # client logic: analysis, auth (per-tab), router, portal,
+│   │                              #   edit-listing, chat, realtime + push notifications, analytics
 │   ├── sw.js                      # service worker (receives Web Push, handles notification clicks)
 │   └── images/                    # logo + env-impact card images
 ├── infra/
@@ -146,7 +155,8 @@ smartwaste-app/
 │   ├── profile/                   # JWT-verified profile CRUD + feedback + delete account
 │   └── collect/                   # JWT-verified listings + quotes + lifecycle + chat
 │       │                          #   + collector verification + admin queue:
-│       │                          #   report/quote, approve/confirm/cancel/done/dispute,
+│       │                          #   report/edit/quote, approve/confirm/cancel/done/dispute,
+│       │                          #   analytics, notify-channel, subscribe/unsubscribe (Web Push),
 │       │                          #   /collector/apply|submit|upload-url|me,
 │       │                          #   /admin/collectors (list/approve/reject/suspend)
 │       └── (each: app.py, run.sh, requirements.txt)
@@ -201,6 +211,8 @@ sam deploy --stack-name smartwaste \
 
 After deploy, the pipeline injects the stack outputs (Function URLs, Cognito IDs, AppSync endpoints) and the map key into the frontend before syncing to S3.
 
+> **Post-deploy manual steps:** add the three VAPID GitHub secrets (see *Web Push setup*) for device push, and add at least one user to the Cognito `admins` group (see *Admin setup*) to use the collector-verification queue. The per-user real-time notification token is generated **lazily** — existing users get one automatically the first time their browser calls `notify-channel` after login, so no migration is needed.
+
 ---
 
 ## Web Push setup
@@ -242,9 +254,34 @@ Web Push is opt-in. While **logged in**, open **Profile → Settings** and click
 
 ---
 
+## Admin setup (collector verification)
+
+The collector-verification queue (`#/admin/collectors`) is gated by membership in a Cognito **`admins` group**. The SAM template creates that group **empty** — no user is an admin by default. To make yourself an admin:
+
+1. Get the User Pool id (a stack output):
+   ```bash
+   aws cloudformation describe-stacks --stack-name smartwaste \
+     --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolId'].OutputValue" \
+     --output text --region ap-southeast-1
+   ```
+2. Add your user to the `admins` group:
+   ```bash
+   aws cognito-idp admin-add-user-to-group \
+     --user-pool-id ap-southeast-1_XXXXXXXXX \
+     --username you@example.com \
+     --group-name admins \
+     --region ap-southeast-1
+   ```
+   (Or in the console: **Cognito → your user pool → Groups → `admins` → Add user**.)
+3. **Log out and back in.** Group membership is baked into the ID token at login (`cognito:groups`), so an existing session won't see it until a fresh token is issued.
+
+After re-login, the **Admin** (shield) icon appears in the header and `#/admin/collectors` opens. Three layers enforce this: the header button is hidden for non-admins, the route bounces non-admins to home, and every `/admin/...` Lambda route re-verifies the group claim (`_is_admin`) and returns 403 otherwise — the server check is the real security boundary. Remove an admin with `admin-remove-user-from-group` (they must re-login to lose UI access).
+
+---
+
 ## Running tests
 
-Unit tests cover the pure logic (JSON parsers, address masking, request-view unlocking, facility classification, distance/URL helpers) **plus the marketplace invariants** — quote validation and the max-price ceiling, the free-vs-paid lane rules, the `priceType` fail-safe default, the confirm-gate unlock statuses, the admin prefix-dispatch gate, and the upload content-type allow-list — all with AWS dependencies stubbed, so no credentials or network are needed.
+Unit tests cover the pure logic (JSON parsers, address masking, request-view unlocking, facility classification, distance/URL helpers) **plus the marketplace invariants** — quote validation and the max-price ceiling, the free-vs-paid lane rules, the `priceType` fail-safe default, the confirm-gate unlock statuses, the admin prefix-dispatch gate, the upload content-type allow-list, the idempotent `mark_done` guard, the owner/status edit guards, and the analytics impact-factor/weight-parsing helpers — all with AWS dependencies stubbed, so no credentials or network are needed.
 
 ```bash
 pip install -r requirements-dev.txt

@@ -2757,6 +2757,30 @@
         if (nl) nl.classList.remove('show-detail');
     });
 
+    function setNotifBadgeCount(unread) {
+        if (!notifBadge) return;
+        notifBadge.textContent = unread > 9 ? '9+' : String(unread);
+        notifBadge.hidden = unread <= 0;
+    }
+
+    // Current badge count as a number (0 when hidden/empty).
+    function currentNotifBadgeCount() {
+        if (!notifBadge || notifBadge.hidden) return 0;
+        var t = (notifBadge.textContent || '').trim();
+        if (t === '9+') return 9;  // treat as "at least 9"
+        var n = parseInt(t, 10);
+        return isNaN(n) ? 0 : n;
+    }
+
+    // Optimistically bump the badge by one for a realtime event. DynamoDB
+    // query-after-write is eventually consistent, so a re-fetch right after a
+    // realtime push can miss the just-written row and return a stale count;
+    // incrementing locally makes the badge react instantly. A later
+    // refreshNotifBadge() reconciles to the authoritative server count.
+    function bumpNotifBadge() {
+        setNotifBadgeCount(currentNotifBadgeCount() + 1);
+    }
+
     function refreshNotifBadge() {
         if (!collectConfigured() || !Auth.isLoggedIn()) {
             if (notifBadge) notifBadge.hidden = true;
@@ -2764,10 +2788,7 @@
         }
         collectFetch('GET', null, 'notifications').then(function(data) {
             var unread = (data && data.unread) || 0;
-            if (notifBadge) {
-                notifBadge.textContent = unread > 9 ? '9+' : String(unread);
-                notifBadge.hidden = unread === 0;
-            }
+            setNotifBadgeCount(unread);
         }).catch(function() {});
     }
 
@@ -2821,7 +2842,7 @@
     }
 
     function loadLifecycleRequests() {
-        collectFetch('GET', null, 'requests').then(function(data) {
+        return collectFetch('GET', null, 'requests').then(function(data) {
             lifecycleRequests.incoming = (data && data.incoming) || [];
             lifecycleRequests.outgoing = (data && data.outgoing) || [];
         }).catch(function() {});
@@ -3029,9 +3050,21 @@
             collectFetch('POST', { collectRequestId: id }, suffix).then(function() {
                 // Refresh everything affected.
                 loadNotifications();
-                loadLifecycleRequests();
                 refreshNotifBadge();
-                notifDetailEl.innerHTML = '<div class="placeholder-text">Done. Updated.</div>';
+                // Reload the lifecycle data, then RE-RENDER the SAME request's
+                // detail in its new status so the next action stays visible
+                // without re-clicking — e.g. Approve -> immediately show
+                // "Confirm deal" (the owner must confirm; closing the panel
+                // would hide that next step). If the request is gone/terminal,
+                // fall back to a short confirmation.
+                loadLifecycleRequests().then(function() {
+                    var cr = findCollectRequest(id);
+                    if (cr) {
+                        showNotifDetailForCollectRequest(cr, cr.wasteType || '');
+                    } else {
+                        notifDetailEl.innerHTML = '<div class="placeholder-text">Done. Updated.</div>';
+                    }
+                });
             }).catch(function(err) {
                 btn.disabled = false;
                 notifDetailEl.insertAdjacentHTML('beforeend',
@@ -3470,8 +3503,14 @@
             if (notifBadge) notifBadge.hidden = true;
             collectFetch('POST', null, 'notifications/read').catch(function() {});
         } else {
-            // Page not open: just refresh the authoritative unread count.
-            if (typeof refreshNotifBadge === 'function') refreshNotifBadge();
+            // Page not open: bump the badge instantly from the event itself so
+            // it reacts even if a query-after-write would miss the new row, then
+            // reconcile to the authoritative server count after a short delay
+            // (lets DynamoDB's eventually-consistent query catch up).
+            bumpNotifBadge();
+            setTimeout(function() {
+                if (typeof refreshNotifBadge === 'function') refreshNotifBadge();
+            }, 1500);
         }
     }
 
