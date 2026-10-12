@@ -2832,6 +2832,18 @@ body.on-subpage footer {
     min-width: 0;
 }
 
+/* Phone-only in-page back control; hidden on all widths by default and only
+   revealed inside the phone @media blocks when a detail view is active. */
+.phone-detail-back {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--primary);
+    font: inherit;
+    cursor: pointer;
+    padding: 0;
+}
+
 .notif-item-body,
 .notif-item-title,
 .notif-item-text {
@@ -2971,6 +2983,39 @@ body.on-subpage footer {
 
     .notif-layout {
         grid-template-columns: 1fr;
+        padding: 0;
+        gap: 0;
+    }
+
+    /* default on phone: show the feed, hide the detail */
+    .notif-detail-col {
+        display: none;
+    }
+
+    .notif-feed-col {
+        padding: 1rem;
+    }
+
+    /* detail state: hide feed, show full-screen detail with its back button */
+    .notif-layout.show-detail .notif-feed-col {
+        display: none;
+    }
+
+    .notif-layout.show-detail .notif-detail-col {
+        display: block;
+        padding: 1rem;
+    }
+
+    .notif-layout.show-detail .notif-detail-col .phone-detail-back {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        margin-bottom: 0.75rem;
+    }
+
+    .notif-detail {
+        min-height: calc(100vh - 160px);
+        overflow-y: auto;
     }
 }
 
@@ -3183,8 +3228,30 @@ body.on-subpage footer {
         grid-template-columns: 1fr;
     }
 
+    /* default on phone: show the conversation list full height, hide the thread */
     .chat-convos {
-        max-height: 32vh;
+        max-height: none;
+        height: 100%;
+    }
+
+    .chat-thread-col {
+        display: none;
+    }
+
+    /* detail state: hide the list, show the thread column full-screen */
+    .chat-layout.show-detail .chat-convos {
+        display: none;
+    }
+
+    .chat-layout.show-detail .chat-thread-col {
+        display: flex;
+    }
+
+    .chat-layout.show-detail .chat-thread-col .phone-detail-back {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        margin: 0.5rem 0.75rem 0;
     }
 }
 

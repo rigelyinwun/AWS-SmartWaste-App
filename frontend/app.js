@@ -175,6 +175,9 @@
     var fileMime = null;
     var chatHistory = [];
     var lastWasteDetails = null;  // most recent analysis, for public-collect reports
+    // When set, the report form is in "edit mode" for the owner's existing
+    // listing (POSTs 'edit' with this requestId) instead of creating a new one.
+    var reportEditMode = null;
 
     // DOM elements
     var uploadZone = document.getElementById('uploadZone');
@@ -1810,6 +1813,13 @@
         if (!Auth.isLoggedIn()) { openAuth('login'); return; }
         if (!lastWasteDetails) { alert('Please analyze a waste item first.'); return; }
 
+        // Create path: ensure edit mode is cleared and the create labels show.
+        reportEditMode = null;
+        var reportTitleEl = document.getElementById('reportTitle');
+        if (reportTitleEl) reportTitleEl.textContent = 'List waste for collection';
+        if (reportSubmit) reportSubmit.textContent = 'List for Collection';
+        if (reportSummary) reportSummary.hidden = false;
+
         var w = wasteSummaryFromAnalysis();
         reportSummary.innerHTML =
             '<div class="report-summary-row"><span>Item</span><strong>' +
@@ -2641,11 +2651,20 @@
 
     // Router entry: notifications view visible — load feed + lifecycle data.
     function onEnterNotifications() {
+        var nl = document.querySelector('.notif-layout');
+        if (nl) nl.classList.remove('show-detail');  // phone: always open on the feed list
         loadNotifications();
         loadLifecycleRequests();
     }
 
     if (notifBtn) notifBtn.addEventListener('click', function() { navigate('notifications'); });
+
+    // Phone-only in-page back: pop detail -> feed (no-op on desktop, where the class is unused).
+    var notifPhoneBack = document.getElementById('notifPhoneBack');
+    if (notifPhoneBack) notifPhoneBack.addEventListener('click', function() {
+        var nl = document.querySelector('.notif-layout');
+        if (nl) nl.classList.remove('show-detail');
+    });
 
     function refreshNotifBadge() {
         if (!collectConfigured() || !Auth.isLoggedIn()) {
@@ -2704,6 +2723,8 @@
             items[j].addEventListener('click', function() {
                 var n = notifData[parseInt(this.getAttribute('data-idx'), 10)];
                 showNotifDetail(n);
+                var nl = document.querySelector('.notif-layout');
+                if (nl) nl.classList.add('show-detail');  // phone: slide to detail (no-op on desktop)
             });
         }
     }
@@ -3032,6 +3053,14 @@
     var chatPollTimer = null;      // polling fallback timer
     var lastMsgTs = 0;             // newest message createdAt seen
 
+    // Phone-only in-page back: tear down the live connection, then pop thread -> list.
+    var chatPhoneBack = document.getElementById('chatPhoneBack');
+    if (chatPhoneBack) chatPhoneBack.addEventListener('click', function() {
+        if (typeof window.leaveChatPage === 'function') window.leaveChatPage();
+        var cl = document.querySelector('.chat-layout');
+        if (cl) cl.classList.remove('show-detail');
+    });
+
     function appsyncConfigured() {
         return APPSYNC_CONFIG.realtime && APPSYNC_CONFIG.realtime.indexOf('__APPSYNC_') !== 0 &&
                APPSYNC_CONFIG.apiKey && APPSYNC_CONFIG.apiKey.indexOf('__APPSYNC_') !== 0;
@@ -3044,6 +3073,8 @@
 
     // Router entry: chat view visible — arg is optional conversationId.
     function onEnterChat(conversationId) {
+        var cl = document.querySelector('.chat-layout');
+        if (cl) cl.classList.remove('show-detail');  // phone: always open on the conversation list
         loadConversations(conversationId);
     }
 
@@ -3061,7 +3092,8 @@
             chatConvos = (data && data.conversations) || [];
             renderConvos();
             if (openId) openConversation(openId);
-            else if (chatConvos.length) openConversation(chatConvos[0].conversationId);
+            // Only auto-open the first conversation on desktop/tablet; phone stays list-first.
+            else if (chatConvos.length && window.matchMedia('(min-width: 769px)').matches) openConversation(chatConvos[0].conversationId);
         }).catch(function(err) {
             chatConvosEl.innerHTML = '<div class="error-message">\u26a0\ufe0f ' + escapeHtml(err.message) + '</div>';
         });
@@ -3090,6 +3122,8 @@
         for (var j = 0; j < btns.length; j++) {
             btns[j].addEventListener('click', function() {
                 openConversation(this.getAttribute('data-cid'));
+                var cl = document.querySelector('.chat-layout');
+                if (cl) cl.classList.add('show-detail');  // phone: slide to thread (no-op on desktop)
             });
         }
     }
