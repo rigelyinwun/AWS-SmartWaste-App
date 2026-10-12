@@ -2380,6 +2380,15 @@ body.on-subpage footer {
     text-align: center;
 }
 
+/* Request-detail action row (e.g. Approve / Reject): keep both buttons at their
+   natural content width (Approve's original size) rather than letting Reject
+   stretch to fill the row. */
+.notif-detail-actions > .btn-profile-delete {
+    flex: 0 0 auto;
+    min-width: 0;
+    padding: 0.7rem 1.4rem;
+}
+
 /* Profile messages */
 .profile-msg {
     font-size: 0.82rem;
