@@ -120,6 +120,13 @@
             return !!user;
         },
 
+        // True only when the current ID token's cognito:groups contains 'admins'.
+        // Convenience gate for UI; the server re-verifies via _is_admin.
+        isAdmin: function() {
+            var p = Auth.profile();
+            return !!(p && (p.groups || []).indexOf('admins') !== -1);
+        },
+
         // Returns {email, name, sub} from the current ID token payload, or null.
         profile: function() {
             var user = Auth.currentUser();
@@ -1135,9 +1142,7 @@
         // _is_admin on every /admin call.
         var adminNavBtn = document.getElementById('adminNavBtn');
         if (adminNavBtn) {
-            var isAdmin = loggedIn && profile &&
-                (profile.groups || []).indexOf('admins') !== -1;
-            adminNavBtn.hidden = !isAdmin;
+            adminNavBtn.hidden = !(loggedIn && Auth.isAdmin());
         }
 
         // Refresh the notification badge whenever auth state changes.
@@ -1194,7 +1199,7 @@
         'chat': { view: 'chatPageOverlay', gated: true, enter: function(arg) { onEnterChat(arg); } },
         'notifications': { view: 'notifOverlay', gated: true, enter: function() { onEnterNotifications(); } },
         'portal': { view: 'portalOverlay', gated: true, enter: function(arg) { onEnterPortal(arg); } },
-        'admin': { view: 'adminOverlay', gated: true, enter: function() { onEnterAdmin(); } },
+        'admin': { view: 'adminOverlay', gated: true, adminOnly: true, enter: function() { onEnterAdmin(); } },
     };
 
     function parseHash() {
@@ -1242,6 +1247,17 @@
                 history.replaceState(null, '', '#/');
             }
             openAuth('login');
+            return;
+        }
+
+        // Admin-gate: a logged-in non-admin that reaches an admin-only route
+        // (e.g. by typing #/admin or a stale hash) is bounced to home. The
+        // server also re-verifies admin on every /admin call.
+        if (def.adminOnly && !Auth.isAdmin()) {
+            showView('viewHome');
+            if (location.hash && location.hash !== '#/') {
+                history.replaceState(null, '', '#/');
+            }
             return;
         }
 
@@ -2354,7 +2370,12 @@
                 } else if (cr && cr.status === 'collected') {
                     html += '<button type="button" class="btn-request-track" data-done-cr="' + escapeHtml(cr.collectRequestId) + '" disabled>' +
                         '<i class="fa-solid fa-flag-checkered"></i> Collected</button>';
+                } else if ((r.status || 'open') === 'open') {
+                    // Still pending — nobody has requested it yet, so there is
+                    // nothing to track. Show a disabled "Track Request".
+                    html += '<button type="button" class="btn-request-track" disabled title="No collection requests yet">Track Request</button>';
                 } else {
+                    // Item has been requested (or further along) — tracking is live.
                     html += '<button type="button" class="btn-request-track" data-req="' + escapeHtml(r.requestId) + '">Track Request</button>';
                 }
             }
@@ -2740,7 +2761,8 @@
 
             var actions = '';
             if (cr.status === 'requested') {
-                actions = '<button type="button" class="btn-profile-primary" data-approve="' + crId + '"><i class="fa-solid fa-check"></i> Accept</button>';
+                actions = '<button type="button" class="btn-profile-primary" data-approve="' + crId + '"><i class="fa-solid fa-check"></i> Accept</button>' +
+                          '<button type="button" class="btn-profile-delete" data-reject="' + crId + '"><i class="fa-solid fa-xmark"></i> Reject</button>';
             } else if (cr.status === 'accepted') {
                 actions = '<button type="button" class="btn-profile-primary" data-confirm="' + crId + '"' + payAttrs(cr) + '><i class="fa-solid fa-handshake"></i> Confirm deal</button>' +
                           '<button type="button" class="btn-profile-secondary" data-cancel="' + crId + '"><i class="fa-solid fa-xmark"></i> Cancel</button>';
