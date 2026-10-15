@@ -17,7 +17,7 @@ AI-powered waste analysis, disposal guidance, and a verified-collector waste mar
 
 ### Waste collection marketplace (requires login)
 - **Accounts** — real sign-up / email-verification / login via Amazon Cognito.
-- **Profile page** — view/edit name, phone, address, settings; rate & feedback; privacy & terms; logout; delete account (with confirmation); **Become a collector** (apply for verified-business status).
+- **Profile page** — view/edit name, phone, address, settings; rate & feedback; privacy & terms; logout; delete account (with confirmation); **Become a business collector** (apply for verified-business status).
 - **Two listing lanes** on *Allow Public Collect*:
   - **Free giveaway** (`priceType: free`) — any logged-in user can collect it, no payment, no business verification.
   - **Paid pickup** (`priceType: user_pays`, the default) — the owner sets an optional **max price** they'll pay for removal; only a **verified collector business** can quote on it.
