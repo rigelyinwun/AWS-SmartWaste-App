@@ -588,6 +588,165 @@ def test_edit_report_no_image_skips_validation(monkeypatch):
     assert cap.updates[0]["ExpressionAttributeValues"][":weight"] == "3kg"
 
 
+# ===================== Waste-photo S3 store + presigned imageUrl =============
+# These exercise pure key-construction / content-type / size guards and the
+# best-effort store/presign paths; the boto3 S3 client is a local capturing fake
+# (the conftest stub's real client raises), so nothing touches AWS.
+
+import base64 as _b64
+
+
+def _b64_bytes(n):
+    """Return a base64 string that decodes to exactly n bytes."""
+    return _b64.b64encode(b"\x00" * n).decode("ascii")
+
+
+class _FakeS3:
+    """Records put_object calls and returns a sentinel presigned URL."""
+    def __init__(self, put_raises=False, presign_raises=False):
+        self.puts = []
+        self.put_raises = put_raises
+        self.presign_raises = presign_raises
+
+    def put_object(self, **k):
+        if self.put_raises:
+            raise RuntimeError("s3 down")
+        self.puts.append(k)
+
+    def generate_presigned_url(self, op, Params=None, ExpiresIn=None):
+        if self.presign_raises:
+            raise RuntimeError("presign down")
+        return "https://signed/{}?e={}".format((Params or {}).get("Key"), ExpiresIn)
+
+
+def _setup_s3(monkeypatch, **fake_kwargs):
+    fake = _FakeS3(**fake_kwargs)
+    monkeypatch.setattr(app, "s3", fake)
+    monkeypatch.setattr(app, "COLLECTOR_DOCS_BUCKET", "bucket")
+    return fake
+
+
+# --- _store_waste_image unit behavior ---------------------------------------
+
+def test_store_waste_image_png_puts_and_returns_key(monkeypatch):
+    fake = _setup_s3(monkeypatch)
+    key = app._store_waste_image("req-123", _b64_bytes(10), "image/png")
+    assert key == "waste/req-123"
+    assert len(fake.puts) == 1
+    put = fake.puts[0]
+    assert put["Bucket"] == "bucket"
+    assert put["Key"] == "waste/req-123"
+    assert put["ContentType"] == "image/png"
+    assert put["Body"] == b"\x00" * 10
+
+
+def test_store_waste_image_rejects_disallowed_mime(monkeypatch):
+    fake = _setup_s3(monkeypatch)
+    for bad in ("application/pdf", "image/gif", "text/html", ""):
+        assert app._store_waste_image("r", _b64_bytes(4), bad) is None
+    assert fake.puts == []  # nothing stored for a disallowed mime
+
+
+def test_store_waste_image_over_size_cap_skips(monkeypatch):
+    fake = _setup_s3(monkeypatch)
+    big = _b64_bytes(app.WASTE_IMAGE_MAX_BYTES + 1)
+    assert app._store_waste_image("r", big, "image/jpeg") is None
+    assert fake.puts == []
+
+
+def test_store_waste_image_put_failure_returns_none(monkeypatch):
+    _setup_s3(monkeypatch, put_raises=True)
+    # Best-effort: a failed put logs and returns None rather than raising.
+    assert app._store_waste_image("r", _b64_bytes(4), "image/png") is None
+
+
+def test_store_waste_image_no_bucket_returns_none(monkeypatch):
+    monkeypatch.setattr(app, "COLLECTOR_DOCS_BUCKET", "")
+    assert app._store_waste_image("r", _b64_bytes(4), "image/png") is None
+
+
+# --- create_report persists imageKey (best-effort) --------------------------
+
+def test_create_report_stores_image_key(monkeypatch):
+    cap = _setup_create_report(monkeypatch)
+    fake = _setup_s3(monkeypatch)
+    app.create_report({"sub": "u1"},
+                      _report_body(file_data=_b64_bytes(8), file_mime="image/png"))
+    item = cap.put_items[0]
+    # Key uses the server-generated requestId (uuid4), not a client value.
+    assert item["imageKey"] == "waste/{}".format(item["requestId"])
+    assert fake.puts[0]["Key"] == item["imageKey"]
+
+
+def test_create_report_s3_failure_still_lists_without_image(monkeypatch):
+    cap = _setup_create_report(monkeypatch)
+    _setup_s3(monkeypatch, put_raises=True)
+    resp = app.create_report({"sub": "u1"},
+                             _report_body(file_data=_b64_bytes(8), file_mime="image/png"))
+    # Listing still created, no imageKey, and no error Response (returns a view).
+    assert isinstance(resp, dict)
+    assert "imageKey" not in cap.put_items[0]
+
+
+def test_create_report_oversize_image_no_key(monkeypatch):
+    cap = _setup_create_report(monkeypatch)
+    fake = _setup_s3(monkeypatch)
+    big = _b64_bytes(app.WASTE_IMAGE_MAX_BYTES + 1)
+    app.create_report({"sub": "u1"},
+                      _report_body(file_data=big, file_mime="image/png"))
+    assert "imageKey" not in cap.put_items[0]
+    assert fake.puts == []
+
+
+# --- public_view presigned imageUrl -----------------------------------------
+
+def test_public_view_includes_image_url_for_owner_and_non_owner(monkeypatch):
+    _setup_s3(monkeypatch)
+    item = {"requestId": "w1", "ownerId": "o1", "status": "open",
+            "imageKey": "waste/w1"}
+    for owner in (True, False):
+        view = app.public_view(item, owner=owner)
+        assert view["imageUrl"] == "https://signed/waste/w1?e=3600"
+
+
+def test_public_view_no_image_key_no_url(monkeypatch):
+    _setup_s3(monkeypatch)
+    view = app.public_view({"requestId": "w1", "ownerId": "o1", "status": "open"})
+    assert "imageUrl" not in view
+
+
+def test_public_view_presign_failure_omits_url(monkeypatch):
+    _setup_s3(monkeypatch, presign_raises=True)
+    item = {"requestId": "w1", "ownerId": "o1", "status": "open",
+            "imageKey": "waste/w1"}
+    view = app.public_view(item)  # must not raise
+    assert "imageUrl" not in view
+
+
+# --- edit_report stores a new image only when supplied -----------------------
+
+def test_edit_report_new_image_stores_and_sets_key(monkeypatch):
+    cap = _UpdateTable()
+    monkeypatch.setattr(app, "table", cap)
+    monkeypatch.setattr(app, "_get_waste", lambda wid: _editable_waste())
+    monkeypatch.setattr(app, "validate_image", lambda *a, **k: True)
+    fake = _setup_s3(monkeypatch)
+    resp = app.edit_report({"sub": "owner-1"},
+                           {"requestId": "w1", "file_data": _b64_bytes(6),
+                            "file_mime": "image/jpeg"})
+    assert isinstance(resp, dict)
+    assert fake.puts[0]["Key"] == "waste/w1"  # overwrites same key
+    assert cap.updates[0]["ExpressionAttributeValues"][":imageKey"] == "waste/w1"
+
+
+def test_edit_report_no_image_does_not_touch_image_key(monkeypatch):
+    cap = _setup_edit_report(monkeypatch, _editable_waste())
+    fake = _setup_s3(monkeypatch)
+    app.edit_report({"sub": "owner-1"}, {"requestId": "w1", "weight": "3kg"})
+    assert fake.puts == []
+    assert ":imageKey" not in cap.updates[0].get("ExpressionAttributeValues", {})
+
+
 # ===================== Admin prefix dispatch (invariant e) =====================
 # These harden the routing collision guard: /admin/collectors/{id}/approve MUST
 # be captured by the prefix dispatcher and reach the admin handler, NOT the

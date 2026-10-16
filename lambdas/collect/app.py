@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import os
@@ -201,6 +202,50 @@ COLLECTOR_DOCS_BUCKET = os.environ.get("COLLECTOR_DOCS_BUCKET", "")
 collectors_table = dynamodb.Table(COLLECTORS_TABLE) if COLLECTORS_TABLE else None
 s3 = boto3.client("s3", region_name=REGION)
 DOC_TYPES = {"registration", "license", "insurance"}
+
+# ------------------- Waste-item photos (public-listing images) --------------
+# The uploaded waste image is validated by Bedrock (validate_image) before a
+# listing is created; when it passes we also persist the bytes to the private
+# CollectorDocsBucket under a "waste/<requestId>" key and serve it back only via
+# short-lived presigned GET URLs minted inside these JWT-verified routes. We keep
+# a dedicated content-type allow-list (no PDF, unlike collector docs) so widening
+# UPLOAD_CONTENT_TYPES can never silently widen what waste photos accept.
+WASTE_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg"}
+WASTE_IMAGE_MAX_BYTES = 5 * 1024 * 1024  # ~5 MB cap; dependency-free byte check.
+WASTE_IMAGE_URL_EXPIRY = 3600  # presigned GET lifetime (seconds).
+
+
+def _store_waste_image(request_id, file_data, file_mime):
+    """Best-effort store of a validated waste photo in S3; return the object key
+    ("waste/<requestId>") on success or None on any skip/failure.
+
+    Never raises: the caller creates the listing regardless. Skips (returns None)
+    when the bucket is unconfigured, the mime is outside the allow-list, the body
+    is empty/undecodable, or it exceeds WASTE_IMAGE_MAX_BYTES. Only call this
+    AFTER validate_image has passed."""
+    if not COLLECTOR_DOCS_BUCKET:
+        return None
+    mime = _s(file_mime)
+    if mime not in WASTE_IMAGE_CONTENT_TYPES:
+        return None
+    if not file_data:
+        return None
+    try:
+        raw = base64.b64decode(file_data, validate=False)
+    except Exception as e:
+        logger.warning("waste image decode error: %s", str(e))
+        return None
+    if not raw or len(raw) > WASTE_IMAGE_MAX_BYTES:
+        if raw:
+            logger.warning("waste image over size cap (%d bytes), skipping store", len(raw))
+        return None
+    key = "waste/{}".format(request_id)
+    try:
+        s3.put_object(Bucket=COLLECTOR_DOCS_BUCKET, Key=key, Body=raw, ContentType=mime)
+    except Exception as e:
+        logger.error("waste image put_object error: %s", str(e))
+        return None
+    return key
 
 
 def _get_collector(user_id):
@@ -581,6 +626,12 @@ def create_report(claims, body):
     if not item["area"]:
         item["area"] = "Location on request"
 
+    # Persist the validated photo (best-effort). On any failure the listing is
+    # still created without an imageKey, so the frontend shows a placeholder.
+    image_key = _store_waste_image(request_id, body.get("file_data"), body.get("file_mime"))
+    if image_key:
+        item["imageKey"] = image_key
+
     if table:
         table.put_item(Item=item)
 
@@ -621,7 +672,8 @@ def edit_report(claims, body):
 
     # Re-validate only when a NEW image is actually supplied in the edit body.
     # No image in the body => leave the stored image/validation state untouched.
-    if _s(body.get("file_data")) and _s(body.get("file_mime")):
+    new_image_supplied = bool(_s(body.get("file_data")) and _s(body.get("file_mime")))
+    if new_image_supplied:
         if not validate_image(body.get("file_data"), body.get("file_mime"), body.get("description")):
             return json_response({"error": REPORT_REJECTION}, status=400)
 
@@ -683,6 +735,14 @@ def edit_report(claims, body):
             _set("lat", lat)
             _set("lng", lng)
 
+    # Store a replacement photo only when a new valid image was supplied above
+    # (overwrites the same waste/<waste_id> key). Best-effort: a failed store
+    # leaves the existing image untouched. No new image => imageKey not touched.
+    if new_image_supplied:
+        image_key = _store_waste_image(waste_id, body.get("file_data"), body.get("file_mime"))
+        if image_key:
+            _set("imageKey", image_key)
+
     if not set_parts and not remove_parts:
         # Nothing to change — return the current item as-is.
         return public_view(item, owner=True)
@@ -737,6 +797,19 @@ def public_view(item, owner=False):
     if "lat" in item and "lng" in item:
         view["lat"] = item["lat"]
         view["lng"] = item["lng"]
+    # Waste photo: present only when the item has a stored key AND the presign
+    # succeeds. Shown to owner and non-owner alike (by design); never exposes
+    # contact info. Legacy items have no imageKey -> no imageUrl -> placeholder.
+    image_key = item.get("imageKey")
+    if image_key and COLLECTOR_DOCS_BUCKET:
+        try:
+            view["imageUrl"] = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": COLLECTOR_DOCS_BUCKET, "Key": image_key},
+                ExpiresIn=WASTE_IMAGE_URL_EXPIRY,
+            )
+        except Exception as e:
+            logger.warning("presign waste image error for %s: %s", image_key, str(e))
     if owner:
         view["fullAddress"] = item.get("fullAddress", "")
         view["contactName"] = item.get("contactName", "")

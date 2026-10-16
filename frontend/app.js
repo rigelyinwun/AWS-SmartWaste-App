@@ -2279,6 +2279,9 @@
         for (var i = 0; i < items.length; i++) {
             var r = items[i];
             html += '<div class="request-card">';
+            html += '<div class="request-card-row">';
+            html += wasteThumb(r);
+            html += '<div class="request-card-body">';
             html += '<div class="request-card-head">';
             html += '<div class="request-title">' + escapeHtml(r.wasteType || 'Waste item') + '</div>';
             html += statusBadge(r.status);
@@ -2296,7 +2299,9 @@
             html += '<div class="request-actions">' +
                 '<button type="button" class="btn-request-track" disabled>' +
                 '<i class="fa-solid fa-flag-checkered"></i> Collected</button></div>';
-            html += '</div>';
+            html += '</div>';   // .request-card-body
+            html += '</div>';   // .request-card-row
+            html += '</div>';   // .request-card
         }
         container.innerHTML = html;
     }
@@ -2411,6 +2416,10 @@
             var isMine = myId && r.ownerId === myId;
             var loc = r.area || (r.addressMasked ? 'Location on request' : (r.fullAddress || '—'));
             html += '<div class="request-card">';
+            // Thumbnail (or placeholder) sits to the LEFT of the text content.
+            html += '<div class="request-card-row">';
+            html += wasteThumb(r);
+            html += '<div class="request-card-body">';
             html += '<div class="request-card-head">';
             html += '<div class="request-title">' + escapeHtml(r.wasteType || 'Waste item') + '</div>';
             // Public list shows an "Available" / "Your listing" tag (not the
@@ -2475,8 +2484,10 @@
                     html += '<button type="button" class="btn-request-manage" data-req="' + escapeHtml(r.requestId) + '">Manage</button>';
                 }
             }
-            html += '</div>';
-            html += '</div>';
+            html += '</div>';   // .request-actions
+            html += '</div>';   // .request-card-body
+            html += '</div>';   // .request-card-row
+            html += '</div>';   // .request-card
         }
         container.innerHTML = html;
     }
@@ -2615,7 +2626,13 @@
         if (r.pickupTime) rows += detailRow('Pickup time', r.pickupTime);
         if (mine && r.fullAddress) rows += detailRow('Full address', r.fullAddress);
         if (r.notes) rows += detailRow('Notes', r.notes);
-        reqDetailBody.innerHTML = '<div class="report-summary">' + rows + '</div>';
+        // Waste photo (when present) above the summary; omitted cleanly when absent.
+        var photo = '';
+        if (typeof r.imageUrl === 'string' && r.imageUrl) {
+            photo = '<div class="req-detail-photo"><img loading="lazy" alt="' +
+                escapeAttr(r.wasteType || 'Waste item') + '" src="' + escapeAttr(r.imageUrl) + '"></div>';
+        }
+        reqDetailBody.innerHTML = photo + '<div class="report-summary">' + rows + '</div>';
 
         hideEl('reqDetailError'); hideEl('reqDetailSuccess');
 
@@ -3678,6 +3695,26 @@
 
     function escapeHtml(text) {
         return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // escapeHtml does NOT escape quotes, so it is unsafe for an HTML attribute
+    // value (e.g. an src/alt). escapeAttr additionally escapes " and ' so a
+    // presigned URL or wasteType can be safely interpolated into an attribute.
+    function escapeAttr(text) {
+        return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    // Render the waste thumbnail for a card: the item photo when a presigned
+    // imageUrl is present, otherwise a neutral placeholder tile so cards stay
+    // aligned. Lazy-loaded and attribute-escaped.
+    function wasteThumb(r) {
+        var alt = escapeAttr(r.wasteType || 'Waste item');
+        if (r && typeof r.imageUrl === 'string' && r.imageUrl) {
+            return '<div class="request-thumb">' +
+                '<img loading="lazy" alt="' + alt + '" src="' + escapeAttr(r.imageUrl) + '"></div>';
+        }
+        return '<div class="request-thumb request-thumb-empty">' +
+            '<i class="fa-solid fa-image"></i></div>';
     }
 
     // ===================== Admin: collector verification queue =====================

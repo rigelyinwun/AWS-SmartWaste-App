@@ -82,7 +82,7 @@ Also: `rejected` / `cancelled` / `closed` / `disputed` are all **soft status cha
                                                    collectors derive type)  push_subscriptions,
                                                                             collectors)
 
-          Amazon S3 (private CollectorDocsBucket — collector verification documents, presigned PUT/GET)
+          Amazon S3 (private CollectorDocsBucket — collector verification documents + public-listing waste photos, presigned PUT/GET)
 
    AWS AppSync Events (real-time chat + in-app notifications pub/sub, API-key auth)   •   Web Push (VAPID → browser push services)
 ```
@@ -99,7 +99,7 @@ Also: `rejected` / `cancelled` / `closed` / `disputed` are all **soft status cha
 | **AWS AppSync Events** (2 ChannelNamespaces + API key) | Real-time **chat** (`chat/<collectRequestId>`) between confirmed pairs, and real-time **in-app notifications** (`notifications/<per-user-token>`) for the badge/feed. Publishing is server-side from the `collect` Lambda; the browser subscribes with the shared API key, so both channels are keyed by **unguessable tokens** (a UUID conversation id, and a random per-user notification token) so one user can't subscribe to another's stream |
 | **Chart.js** (CDN, pinned) | The analytics dashboard's monthly/yearly collection line chart and waste-type pie chart (the two % widgets are pure CSS conic-gradient rings, no library) |
 | **Web Push** (W3C Push API + VAPID, `pywebpush`) | OS-level device notifications for new requests, approvals, and chat messages while the tab/browser is closed; a service worker (`sw.js`) receives pushes, the `collect` Lambda signs them with the VAPID keypair and sends to each browser's push service |
-| **Amazon S3** | Static website hosting (frontend); a separate **private `CollectorDocsBucket`** (all public access blocked) holds collector verification documents, written/read via short-lived presigned URLs |
+| **Amazon S3** | Static website hosting (frontend); a separate **private `CollectorDocsBucket`** (all public access blocked) holds collector verification documents **and public-listing waste photos** (under a `waste/<requestId>` key prefix), written/read via short-lived presigned URLs. A waste photo is stored only **after** the server-side Bedrock validation passes, restricted to `image/png`/`image/jpeg` (no PDF, ~5 MB cap), and served to logged-in viewers only via a short-lived (3600 s) presigned GET — the bucket stays private, never public-read. Listings created **before** this feature have no stored photo and show a neutral placeholder; new and image-edited listings get a photo |
 | **Amazon CloudFront** | HTTPS + CDN caching in front of S3 |
 | **AWS IAM** | One shared Lambda execution role (Bedrock, geo-places, DynamoDB incl. `collectors`, Cognito admin, AppSync publish, presigned access to the private docs bucket); a role for AppSync→CloudWatch logs |
 | **Amazon CloudWatch** | Lambda logs + AppSync Events request logging |
